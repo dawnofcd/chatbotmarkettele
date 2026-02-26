@@ -1,0 +1,13 @@
+{
+  "name": "bot-banhang-tele",
+  "version": "1.0.0",
+  "main": "bot/index.js",
+  "scripts": {
+    "start": "node bot/index.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.57.4",
+    "dotenv": "^16.6.1",
+    "telegraf": "^4.16.3"
+  }
+}
