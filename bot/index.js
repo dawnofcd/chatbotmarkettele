@@ -25,23 +25,23 @@ const runtimeAdminIds = new Set(adminTelegramIds);
 
 const TEXTS = {
   vi: {
-    welcome: 'Chao mung den voi Tai Nguyen Hero! Cham vao mot nut de tiep tuc.',
-    noAdmin: 'Ban khong co quyen admin.',
-    adminPanel: 'Bang dieu khien admin',
-    invalidKey: 'Key khong hop le.',
-    adminGranted: 'Cap quyen admin thanh cong. Dung /admin de mo bang dieu khien.',
-    notifyUsage: 'Cach dung: /notify <telegram_id> <noi_dung>',
-    broadcastUsage: 'Cach dung: /broadcast <noi_dung>',
-    loadingCatalogue: 'Danh muc dang tai...',
-    emptyCatalogue: 'Chua co danh muc hoac san pham dang ban.',
-    emptyHistory: 'Ban chua co don hang nao.',
-    supportEmpty: 'Kenh ho tro dang duoc cap nhat.',
-    langCurrent: 'Ngon ngu hien tai: Tieng Viet',
-    orderCreated: 'Dat hang thanh cong. Ma don: #{id}\\nTong tien: {total} {currency}',
-    outOfStock: 'San pham da het hang.',
-    productMissing: 'Khong tim thay san pham.',
-    orderStatusUpdated: 'Da cap nhat don #{id} -> {status}',
-    reportTitle: 'Bao cao nhanh',
+    welcome: 'Xin chào {name}!\\nChào mừng bạn đến với Tài Nguyên Hero.\\nHãy chọn một mục bên dưới để tiếp tục.',
+    noAdmin: 'Bạn không có quyền quản trị.',
+    adminPanel: 'Bảng điều khiển quản trị',
+    invalidKey: 'Mã bí mật không hợp lệ.',
+    adminGranted: 'Cấp quyền quản trị thành công. Dùng /admin để mở bảng điều khiển.',
+    notifyUsage: 'Cách dùng: /notify <telegram_id> <nội_dung>',
+    broadcastUsage: 'Cách dùng: /broadcast <nội_dung>',
+    loadingCatalogue: 'Đang tải danh mục...',
+    emptyCatalogue: 'Chưa có danh mục hoặc sản phẩm đang bán.',
+    emptyHistory: 'Bạn chưa có đơn hàng nào.',
+    supportEmpty: 'Kênh hỗ trợ đang được cập nhật.',
+    langCurrent: 'Ngôn ngữ hiện tại: Tiếng Việt',
+    orderCreated: 'Đặt hàng thành công. Mã đơn: #{id}\\nTổng tiền: {total} {currency}',
+    outOfStock: 'Sản phẩm đã hết hàng.',
+    productMissing: 'Không tìm thấy sản phẩm.',
+    orderStatusUpdated: 'Đã cập nhật đơn #{id} -> {status}',
+    reportTitle: 'Báo cáo nhanh',
   },
   en: {
     welcome: 'Welcome to Tai Nguyen Hero! Tap a button to continue.',
@@ -80,9 +80,9 @@ function t(locale, key, params = {}) {
   return text;
 }
 
-function mainMenu(locale) {
+function mainMenu(locale, hasAdminAccess = false) {
   if (locale === 'en') {
-    return Markup.inlineKeyboard([
+    const rows = [
       [
         Markup.button.callback('Catalogue', 'menu_catalogue'),
         Markup.button.callback('History', 'menu_history'),
@@ -91,10 +91,16 @@ function mainMenu(locale) {
         Markup.button.callback('Support', 'menu_support'),
         Markup.button.callback('Language', 'menu_language'),
       ],
-    ]);
+    ];
+
+    if (hasAdminAccess) {
+      rows.push([Markup.button.callback('Admin', 'menu_admin')]);
+    }
+
+    return Markup.inlineKeyboard(rows);
   }
 
-  return Markup.inlineKeyboard([
+  const rows = [
     [
       Markup.button.callback('Danh muc', 'menu_catalogue'),
       Markup.button.callback('Lich su', 'menu_history'),
@@ -103,15 +109,24 @@ function mainMenu(locale) {
       Markup.button.callback('Ho tro', 'menu_support'),
       Markup.button.callback('Ngon ngu', 'menu_language'),
     ],
-  ]);
-}
+  ];
 
+  if (hasAdminAccess) {
+    rows.push([Markup.button.callback('Admin', 'menu_admin')]);
+  }
+
+  return Markup.inlineKeyboard(rows);
+}
 const adminMenu = Markup.inlineKeyboard([
   [
     Markup.button.callback('Don moi', 'admin_orders_new'),
     Markup.button.callback('San pham', 'admin_products'),
   ],
   [Markup.button.callback('Thong ke', 'admin_reports')],
+  [
+    Markup.button.callback('Them san pham', 'admin_add_product_help'),
+    Markup.button.callback('Thong bao theo loai', 'admin_notify_category_help'),
+  ],
 ]);
 
 async function ensureUser(ctx) {
@@ -209,6 +224,48 @@ function getCommandPayload(text, command) {
   return (text || '').replace(pattern, '').trim();
 }
 
+function chunkArray(items, chunkSize) {
+  const chunks = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    chunks.push(items.slice(i, i + chunkSize));
+  }
+  return chunks;
+}
+
+function slugifyName(name) {
+  return String(name || '')
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 50);
+}
+
+function parseAddProductPayload(payload) {
+  const parts = payload.split('|').map((p) => p.trim());
+  const [categoryId, name, priceRaw, stockRaw, currencyRaw, ...descriptionParts] = parts;
+  const description = descriptionParts.join('|').trim();
+  const price = Number(priceRaw);
+  const stock = Number(stockRaw);
+  const currency = (currencyRaw || 'VND').toUpperCase();
+
+  if (!categoryId || !name || !Number.isFinite(price) || !Number.isInteger(stock)) {
+    return { ok: false };
+  }
+
+  return {
+    ok: true,
+    data: {
+      categoryId,
+      name,
+      price,
+      stock,
+      currency,
+      description,
+    },
+  };
+}
+
 async function getAllUserTelegramIds() {
   const pageSize = 500;
   let from = 0;
@@ -254,6 +311,34 @@ async function loadActiveCategories() {
   return data || [];
 }
 
+async function loadAllCategories() {
+  const { data, error } = await supabase
+    .from('categories')
+    .select('id,name,is_active')
+    .order('name', { ascending: true })
+    .limit(200);
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
+async function loadCategoryById(categoryId) {
+  const { data, error } = await supabase
+    .from('categories')
+    .select('id,name,is_active')
+    .eq('id', categoryId)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
 async function loadProductsByCategory(categoryId) {
   const { data, error } = await supabase
     .from('products')
@@ -283,6 +368,119 @@ async function loadProduct(productId) {
   }
 
   return data;
+}
+
+async function createProduct(input) {
+  const slugBase = slugifyName(input.name) || `product-${Date.now()}`;
+  const slug = `${slugBase}-${Math.random().toString(36).slice(2, 7)}`;
+  const { data, error } = await supabase
+    .from('products')
+    .insert({
+      category_id: input.categoryId,
+      name: input.name,
+      slug,
+      description: input.description || null,
+      price: input.price,
+      currency: input.currency || 'VND',
+      stock_quantity: input.stock,
+      is_active: true,
+    })
+    .select('id,name,price,currency,stock_quantity')
+    .single();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+async function getUserTelegramIdsByCategory(categoryId) {
+  const { data: products, error: productsError } = await supabase
+    .from('products')
+    .select('id')
+    .eq('category_id', categoryId)
+    .limit(5000);
+
+  if (productsError) {
+    throw productsError;
+  }
+
+  const productIds = (products || []).map((row) => row.id).filter(Boolean);
+  if (productIds.length === 0) {
+    return [];
+  }
+
+  const orderIdSet = new Set();
+  for (const productChunk of chunkArray(productIds, 200)) {
+    const { data: items, error: itemsError } = await supabase
+      .from('order_items')
+      .select('order_id')
+      .in('product_id', productChunk)
+      .limit(5000);
+
+    if (itemsError) {
+      throw itemsError;
+    }
+
+    for (const row of items || []) {
+      if (row.order_id) {
+        orderIdSet.add(row.order_id);
+      }
+    }
+  }
+
+  const orderIds = [...orderIdSet];
+  if (orderIds.length === 0) {
+    return [];
+  }
+
+  const userIdSet = new Set();
+  for (const orderChunk of chunkArray(orderIds, 200)) {
+    const { data: orders, error: ordersError } = await supabase
+      .from('orders')
+      .select('user_id')
+      .in('id', orderChunk)
+      .limit(5000);
+
+    if (ordersError) {
+      throw ordersError;
+    }
+
+    for (const row of orders || []) {
+      if (row.user_id) {
+        userIdSet.add(row.user_id);
+      }
+    }
+  }
+
+  const userIds = [...userIdSet];
+  if (userIds.length === 0) {
+    return [];
+  }
+
+  const telegramIdSet = new Set();
+  for (const userChunk of chunkArray(userIds, 200)) {
+    const { data: users, error: usersError } = await supabase
+      .from('users')
+      .select('telegram_id')
+      .in('id', userChunk)
+      .not('telegram_id', 'is', null)
+      .limit(5000);
+
+    if (usersError) {
+      throw usersError;
+    }
+
+    for (const row of users || []) {
+      const tg = Number(row.telegram_id);
+      if (Number.isInteger(tg)) {
+        telegramIdSet.add(tg);
+      }
+    }
+  }
+
+  return [...telegramIdSet];
 }
 
 async function createSingleItemOrder(userId, product) {
@@ -468,7 +666,8 @@ async function safeReply(ctx, text, extra) {
 bot.start(async (ctx) => {
   const user = await ensureUser(ctx);
   const locale = getLocale(user);
-  await ctx.reply(t(locale, 'welcome'), mainMenu(locale));
+  const firstName = ctx.from.first_name || (locale === 'en' ? 'there' : 'bạn');
+  await ctx.reply(t(locale, 'welcome', { name: firstName }), mainMenu(locale, isAdmin(ctx, user)));
 });
 
 bot.command('admin', async (ctx) => {
@@ -480,6 +679,56 @@ bot.command('admin', async (ctx) => {
   }
 
   await ctx.reply(t(locale, 'adminPanel'), adminMenu);
+});
+
+bot.action('menu_admin', async (ctx) => {
+  const user = await ensureUser(ctx);
+  const locale = getLocale(user);
+  if (!isAdmin(ctx, user)) {
+    await ctx.answerCbQuery(t(locale, 'noAdmin'), { show_alert: true });
+    return;
+  }
+
+  await ctx.answerCbQuery();
+  await ctx.reply(t(locale, 'adminPanel'), adminMenu);
+});
+
+
+
+bot.action('admin_add_product_help', async (ctx) => {
+  const user = await ensureUser(ctx);
+  const locale = getLocale(user);
+  if (!isAdmin(ctx, user)) {
+    await ctx.answerCbQuery(t(locale, 'noAdmin'), { show_alert: true });
+    return;
+  }
+
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    'Them san pham:\n'
+    + '/listcategories\n'
+    + '/addproduct <category_id>|<ten>|<gia>|<ton>|<currency>|<mo_ta>\n'
+    + 'Vi du:\n'
+    + '/addproduct 1111-2222|Tai khoan Premium|99000|10|VND|Su dung 30 ngay',
+  );
+});
+
+bot.action('admin_notify_category_help', async (ctx) => {
+  const user = await ensureUser(ctx);
+  const locale = getLocale(user);
+  if (!isAdmin(ctx, user)) {
+    await ctx.answerCbQuery(t(locale, 'noAdmin'), { show_alert: true });
+    return;
+  }
+
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    'Thong bao theo loai hang:\n'
+    + '/listcategories\n'
+    + '/notifycat <category_id> <noi_dung>\n'
+    + 'Vi du:\n'
+    + '/notifycat 1111-2222 Co deal moi cho nhom san pham nay!',
+  );
 });
 
 bot.command('claimadmin', async (ctx) => {
@@ -530,9 +779,9 @@ bot.command('notify', async (ctx) => {
 
   try {
     await bot.telegram.sendMessage(targetId, message);
-    await ctx.reply(`Da gui thong bao den ${targetId}.`);
+    await ctx.reply(`Đã gửi thông báo đến ${targetId}.`);
   } catch (error) {
-    await ctx.reply(`Gui that bai: ${error.message}`);
+    await ctx.reply(`Gửi thất bại: ${error.message}`);
   }
 });
 
@@ -554,13 +803,12 @@ bot.command('broadcast', async (ctx) => {
   try {
     ids = await getAllUserTelegramIds();
   } catch (error) {
-    await ctx.reply(`Khong tai duoc danh sach user: ${error.message}`);
+    await ctx.reply(`Khong tai duoc danh sach nguoi dung: ${error.message}`);
     return;
   }
 
   let success = 0;
   let failed = 0;
-
   for (const telegramId of ids) {
     try {
       await bot.telegram.sendMessage(telegramId, message);
@@ -571,6 +819,104 @@ bot.command('broadcast', async (ctx) => {
   }
 
   await ctx.reply(`Broadcast xong. Thanh cong: ${success}, that bai: ${failed}.`);
+});
+
+
+bot.command('listcategories', async (ctx) => {
+  const user = await ensureUser(ctx);
+  const locale = getLocale(user);
+  if (!isAdmin(ctx, user)) {
+    await ctx.reply(t(locale, 'noAdmin'));
+    return;
+  }
+
+  const categories = await loadAllCategories();
+  if (categories.length === 0) {
+    await ctx.reply('Chua co category.');
+    return;
+  }
+
+  const lines = categories.map((c) => `${c.id} | ${c.name} | ${c.is_active ? 'active' : 'inactive'}`);
+  await ctx.reply(`Danh sach category (${categories.length}):\n${lines.join('\\n')}`);
+});
+
+bot.command('addproduct', async (ctx) => {
+  const user = await ensureUser(ctx);
+  const locale = getLocale(user);
+  if (!isAdmin(ctx, user)) {
+    await ctx.reply(t(locale, 'noAdmin'));
+    return;
+  }
+
+  const payload = getCommandPayload(ctx.message.text, 'addproduct');
+  const parsed = parseAddProductPayload(payload);
+  if (!parsed.ok) {
+    await ctx.reply(
+      'Sai cu phap.\n'
+      + 'Dung: /addproduct <category_id>|<ten>|<gia>|<ton>|<currency>|<mo_ta>\n'
+      + 'Vi du: /addproduct 1111-2222|Tai khoan Premium|99000|10|VND|Su dung 30 ngay',
+    );
+    return;
+  }
+
+  const category = await loadCategoryById(parsed.data.categoryId);
+  if (!category) {
+    await ctx.reply('Khong tim thay category_id.');
+    return;
+  }
+
+  const created = await createProduct(parsed.data);
+  await ctx.reply(
+    `Da them san pham thanh cong.\n`
+    + `ID: ${created.id}\n`
+    + `Ten: ${created.name}\n`
+    + `Gia: ${created.price} ${created.currency}\n`
+    + `Ton: ${created.stock_quantity}\n`
+    + `Category: ${category.name}`,
+  );
+});
+
+bot.command('notifycat', async (ctx) => {
+  const user = await ensureUser(ctx);
+  const locale = getLocale(user);
+  if (!isAdmin(ctx, user)) {
+    await ctx.reply(t(locale, 'noAdmin'));
+    return;
+  }
+
+  const payload = getCommandPayload(ctx.message.text, 'notifycat');
+  const [categoryId, ...messageParts] = payload.split(/\s+/);
+  const message = messageParts.join(' ').trim();
+
+  if (!categoryId || !message) {
+    await ctx.reply('Dung: /notifycat <category_id> <noi_dung>');
+    return;
+  }
+
+  const category = await loadCategoryById(categoryId);
+  if (!category) {
+    await ctx.reply('Khong tim thay category_id.');
+    return;
+  }
+
+  const targetIds = await getUserTelegramIdsByCategory(categoryId);
+  if (targetIds.length === 0) {
+    await ctx.reply(`Khong co user nao da mua trong loai "${category.name}".`);
+    return;
+  }
+
+  let success = 0;
+  let failed = 0;
+  for (const telegramId of targetIds) {
+    try {
+      await bot.telegram.sendMessage(telegramId, `[${category.name}] ${message}`);
+      success += 1;
+    } catch (error) {
+      failed += 1;
+    }
+  }
+
+  await ctx.reply(`Notify category xong (${category.name}). Thanh cong: ${success}, that bai: ${failed}.`);
 });
 
 bot.action('menu_catalogue', async (ctx) => {
@@ -601,9 +947,9 @@ bot.action(/^cat:(.+)$/, async (ctx) => {
   }
 
   const rows = products.map((p) => [Markup.button.callback(`${p.name} - ${p.price} ${p.currency || 'VND'}`, `prd:${p.id}`)]);
-  rows.push([Markup.button.callback(locale === 'en' ? 'Back to menu' : 'Ve menu', 'menu_catalogue')]);
+  rows.push([Markup.button.callback(locale === 'en' ? 'Back to menu' : 'Về menu', 'menu_catalogue')]);
 
-  await ctx.reply(locale === 'en' ? 'Products:' : 'San pham:', Markup.inlineKeyboard(rows));
+  await ctx.reply(locale === 'en' ? 'Products:' : 'Sản phẩm:', Markup.inlineKeyboard(rows));
 });
 
 bot.action(/^prd:(.+)$/, async (ctx) => {
@@ -620,16 +966,16 @@ bot.action(/^prd:(.+)$/, async (ctx) => {
 
   const details = [
     `${product.name}`,
-    `${locale === 'en' ? 'Price' : 'Gia'}: ${product.price} ${product.currency || 'VND'}`,
-    `${locale === 'en' ? 'Stock' : 'Ton'}: ${product.stock_quantity ?? '-'}`,
+    `${locale === 'en' ? 'Price' : 'Giá'}: ${product.price} ${product.currency || 'VND'}`,
+    `${locale === 'en' ? 'Stock' : 'Tồn'}: ${product.stock_quantity ?? '-'}`,
     product.description || '',
   ].filter(Boolean).join('\\n');
 
   await ctx.reply(
     details,
     Markup.inlineKeyboard([
-      [Markup.button.callback(locale === 'en' ? 'Buy now' : 'Dat ngay', `buy:${product.id}`)],
-      [Markup.button.callback(locale === 'en' ? 'Back' : 'Quay lai', 'menu_catalogue')],
+      [Markup.button.callback(locale === 'en' ? 'Buy now' : 'Đặt ngay', `buy:${product.id}`)],
+      [Markup.button.callback(locale === 'en' ? 'Back' : 'Quay lại', 'menu_catalogue')],
     ]),
   );
 });
@@ -695,9 +1041,9 @@ bot.action('menu_support', async (ctx) => {
 bot.action('menu_language', async (ctx) => {
   await ctx.answerCbQuery();
   await ctx.reply(
-    'Chon ngon ngu / Choose language',
+    'Chọn ngôn ngữ / Choose language',
     Markup.inlineKeyboard([
-      [Markup.button.callback('Tieng Viet', 'lang:vi')],
+      [Markup.button.callback('Tiếng Việt', 'lang:vi')],
       [Markup.button.callback('English', 'lang:en')],
     ]),
   );
@@ -708,8 +1054,9 @@ bot.action(/^lang:(vi|en)$/, async (ctx) => {
   const target = ctx.match[1];
   await setUserLanguage(user.id, target);
   await ctx.answerCbQuery('OK');
+  const firstName = ctx.from.first_name || (target === 'en' ? 'there' : 'bạn');
   await ctx.reply(t(target, 'langCurrent'));
-  await ctx.reply(t(target, 'welcome'), mainMenu(target));
+  await ctx.reply(t(target, 'welcome', { name: firstName }), mainMenu(target, isAdmin(ctx, user)));
 });
 
 bot.action('admin_orders_new', async (ctx) => {
@@ -724,7 +1071,7 @@ bot.action('admin_orders_new', async (ctx) => {
   const orders = await loadAdminOrders();
 
   if (orders.length === 0) {
-    await ctx.reply('Khong co don moi.');
+    await ctx.reply('Không có đơn mới.');
     return;
   }
 
@@ -797,7 +1144,7 @@ bot.action('admin_products', async (ctx) => {
   const products = await loadAdminProducts();
 
   if (products.length === 0) {
-    await ctx.reply('Chua co san pham.');
+    await ctx.reply('Chưa có sản phẩm.');
     return;
   }
 
@@ -807,7 +1154,7 @@ bot.action('admin_products', async (ctx) => {
     await ctx.reply(
       text,
       Markup.inlineKeyboard([
-        [Markup.button.callback(product.is_active ? 'Tat san pham' : 'Mo san pham', `prdtg:${product.id}:${nextActive}`)],
+        [Markup.button.callback(product.is_active ? 'Tắt sản phẩm' : 'Mở sản phẩm', `prdtg:${product.id}:${nextActive}`)],
       ]),
     );
   }
@@ -834,7 +1181,7 @@ bot.action(/^prdtg:(.+):(0|1)$/, async (ctx) => {
   }
 
   await ctx.answerCbQuery('OK');
-  await ctx.reply(`San pham ${productId} -> ${target ? 'active' : 'inactive'}`);
+  await ctx.reply(`Sản phẩm ${productId} -> ${target ? 'active' : 'inactive'}`);
 });
 
 bot.action('admin_reports', async (ctx) => {
@@ -859,7 +1206,7 @@ bot.action('admin_reports', async (ctx) => {
 
 bot.catch(async (err, ctx) => {
   try {
-    await ctx.reply(`Co loi xay ra: ${err.message}`);
+    await ctx.reply(`Có lỗi xảy ra: ${err.message}`);
   } catch (nestedError) {
     // no-op
   }
@@ -874,3 +1221,9 @@ bot.launch().then(() => {
 });
 
 module.exports = bot;
+
+
+
+
+
+
