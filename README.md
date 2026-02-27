@@ -11,6 +11,10 @@ Run Telegram sales bot on Railway (long polling) and store data in Supabase Clou
 Optional:
 - `ADMIN_TELEGRAM_IDS`
 - `ADMIN_SECRET_KEY`
+- `SEPAY_API_KEY`
+- `SEPAY_WEBHOOK_SECRET`
+- `SEPAY_ACCOUNT_NO`
+- `SEPAY_BANK_CODE`
 
 ## Supabase setup
 1. Open Supabase SQL Editor.
@@ -31,6 +35,10 @@ Optional:
    - `SUPABASE_ANON_KEY`
    - `ADMIN_TELEGRAM_IDS` (optional)
    - `ADMIN_SECRET_KEY` (optional)
+   - `SEPAY_API_KEY` (optional)
+   - `SEPAY_WEBHOOK_SECRET` (optional)
+   - `SEPAY_ACCOUNT_NO` (optional)
+   - `SEPAY_BANK_CODE` (optional)
 4. Start command: `npm start` (already in `railway.json`).
 5. Redeploy and check logs for `Bot launched.`
 
