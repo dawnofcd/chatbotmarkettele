@@ -29,19 +29,19 @@ const pendingUserInputs = new Map();
 
 const TEXTS = {
   vi: {
-    welcome: 'Xin chao! Toi la bot ban tai khoan.',
-    menuHint: 'Chon mot muc ben duoi:',
-    emptyCatalogue: 'Danh muc hien dang trong.',
-    emptyHistory: 'Ban chua co don hang nao.',
-    supportEmpty: 'Chua co kenh ho tro.',
-    noAdmin: 'Ban khong co quyen admin.',
+    welcome: 'Xin chào! Tôi là bot bán tài khoản.',
+    menuHint: 'Chọn một mục bên dưới:',
+    emptyCatalogue: 'Danh mục hiện đang trống.',
+    emptyHistory: 'Bạn chưa có đơn hàng nào.',
+    supportEmpty: 'Chưa có kênh hỗ trợ.',
+    noAdmin: 'Bạn không có quyền admin.',
     adminPanel: 'Admin panel',
-    langCurrent: 'Ngon ngu hien tai: Tieng Viet',
-    orderCreated: 'Da tao don. Ma: #{id}\nTong tien: {total} {currency}',
-    outOfStock: 'San pham da het hang.',
-    productMissing: 'Khong tim thay san pham.',
-    orderStatusUpdated: 'Don #{id} da cap nhat -> {status}',
-    reportTitle: 'Bao cao nhanh',
+    langCurrent: 'Ngôn ngữ hiện tại: Tiếng Việt',
+    orderCreated: 'Đã tạo đơn. Mã: #{id}\nTổng tiền: {total} {currency}',
+    outOfStock: 'Sản phẩm đã hết hàng.',
+    productMissing: 'Không tìm thấy sản phẩm.',
+    orderStatusUpdated: 'Đơn #{id} đã cập nhật -> {status}',
+    reportTitle: 'Báo cáo nhanh',
   },
   en: {
     welcome: 'Welcome! I am your account shop bot.',
@@ -156,15 +156,15 @@ async function sendHomePanel(ctx, userRecord, locale) {
 }
 const adminMenu = Markup.inlineKeyboard([
   [
-    Markup.button.callback('Don moi', 'admin_orders_new'),
-    Markup.button.callback('San pham', 'admin_products_v2'),
+    Markup.button.callback('Đơn mới', 'admin_orders_new'),
+    Markup.button.callback('Sản phẩm', 'admin_products_v2'),
   ],
-  [Markup.button.callback('Thong ke', 'admin_reports')],
+  [Markup.button.callback('Thống kê', 'admin_reports')],
   [
-    Markup.button.callback('Them san pham', 'admin_add_product_help'),
-    Markup.button.callback('Thong bao theo loai', 'admin_notify_category_help'),
+    Markup.button.callback('Thêm sản phẩm', 'admin_add_product_help'),
+    Markup.button.callback('Thông báo theo loại', 'admin_notify_category_help'),
   ],
-  [Markup.button.callback('Cap nhat nhieu SP', 'admin_bulk_update_start')],
+  [Markup.button.callback('Cập nhật nhiều SP', 'admin_bulk_update_start')],
 ]);
 
 async function ensureUser(ctx) {
@@ -678,7 +678,7 @@ async function getUserTelegramIdsByCategory(categoryId) {
 async function createSingleItemOrder(userId, product, quantity = 1) {
   const qty = Number(quantity);
   if (!Number.isInteger(qty) || qty <= 0) {
-    throw new Error('So luong khong hop le');
+    throw new Error('Số lượng không hợp lệ');
   }
   const unitPrice = calcUnitPriceByQuantity(product.price, qty);
   const total = unitPrice * qty;
@@ -739,7 +739,7 @@ async function notifyAdminsNewOrder(orderId, total, currency) {
     return;
   }
 
-  const message = `Don moi #${orderId}\\nTong tien: ${total} ${currency}`;
+  const message = `Đơn mới #${orderId}\\nTổng tiền: ${total} ${currency}`;
   for (const telegramId of adminIds) {
     try {
       await bot.telegram.sendMessage(telegramId, message);
@@ -1032,7 +1032,7 @@ async function sendCataloguePanel(ctx, locale, shouldEdit = false) {
 async function processPurchase(ctx, user, locale, product, quantity = 1) {
   const qty = Number(quantity);
   if (!Number.isInteger(qty) || qty <= 0) {
-    await safeReply(ctx, locale === 'en' ? 'Invalid quantity.' : 'So luong khong hop le.');
+    await safeReply(ctx, locale === 'en' ? 'Invalid quantity.' : 'Số lượng không hợp lệ.');
     return;
   }
 
@@ -1049,7 +1049,7 @@ async function processPurchase(ctx, user, locale, product, quantity = 1) {
     currency: order.currency || 'VND',
   });
 
-  await ctx.reply(`${message}\nSo luong: ${qty}\nDon gia: ${unitPrice} ${order.currency || 'VND'}`);
+  await ctx.reply(`${message}\nSố lượng: ${qty}\nĐơn giá: ${unitPrice} ${order.currency || 'VND'}`);
 
   if (product.delivery_type === 'auto') {
     const accounts = [];
@@ -1063,19 +1063,19 @@ async function processPurchase(ctx, user, locale, product, quantity = 1) {
 
     if (accounts.length > 0) {
       await ctx.reply(
-        `Tai khoan cua ban (${accounts.length}/${qty}) - dinh dang tk|mk|2fa:\n${accounts.map((a, idx) => `${idx + 1}. ${a}`).join('\n')}\n\nLuu y: Doi mat khau ngay sau khi nhan.`,
+        `Tài khoản của bạn (${accounts.length}/${qty}) - định dạng tk|mk|2fa:\n${accounts.map((a, idx) => `${idx + 1}. ${a}`).join('\n')}\n\nLưu ý: Đổi mật khẩu ngay sau khi nhận.`,
       );
       if (accounts.length < qty) {
-        await ctx.reply('Con thieu mot so tai khoan auto. Vui long nhan admin de duoc cap bo sung.');
+        await ctx.reply('Còn thiếu một số tài khoản auto. Vui lòng nhắn admin để được cấp bổ sung.');
       }
     } else {
       await ctx.reply(
-        'Tam het tai khoan auto. Vui long nhan admin de duoc cap bo sung sau khi chuyen khoan thanh cong.',
+        'Tạm hết tài khoản auto. Vui lòng nhắn admin để được cấp bổ sung sau khi chuyển khoản thành công.',
       );
     }
   } else {
     const manualNote = product.manual_contact_note
-      || 'Loai khong auto. Sau khi chuyen khoan thanh cong, vui long nhan admin de nhan tai khoan.';
+      || 'Loại không auto. Sau khi chuyển khoản thành công, vui lòng nhắn admin để nhận tài khoản.';
     await ctx.reply(manualNote);
   }
 
@@ -1084,8 +1084,8 @@ async function processPurchase(ctx, user, locale, product, quantity = 1) {
 
 function adminProductsListText(products) {
   const lines = products.map((p) => {
-    const status = p.is_active ? 'dang ban' : 'tam an';
-    return `- ${p.name} | ${p.price} ${p.currency || 'VND'} | ton:${p.stock_quantity ?? '-'} | ${status}`;
+    const status = p.is_active ? 'đang bán' : 'tạm ẩn';
+    return `- ${p.name} | ${p.price} ${p.currency || 'VND'} | tồn:${p.stock_quantity ?? '-'} | ${status}`;
   });
 
   return [
@@ -1093,7 +1093,7 @@ function adminProductsListText(products) {
     '',
     ...lines,
     '',
-    'Chon san pham de sua / xoa / them tai khoan auto.',
+    'Chọn sản phẩm để sửa / xóa / thêm tài khoản auto.',
   ].join('\n');
 }
 
@@ -1105,11 +1105,11 @@ function buildAdminProductsKeyboard(products) {
   });
 
   rows.push([
-    Markup.button.callback('Them moi', 'admin_add_product_start'),
-    Markup.button.callback('Lam moi', 'admin_products_refresh'),
+    Markup.button.callback('Thêm mới', 'admin_add_product_start'),
+    Markup.button.callback('Làm mới', 'admin_products_refresh'),
   ]);
-  rows.push([Markup.button.callback('Cap nhat nhieu SP', 'admin_bulk_update_start')]);
-  rows.push([Markup.button.callback('Dong', 'admin_products_close')]);
+  rows.push([Markup.button.callback('Cập nhật nhiều SP', 'admin_bulk_update_start')]);
+  rows.push([Markup.button.callback('Đóng', 'admin_products_close')]);
 
   return Markup.inlineKeyboard(rows);
 }
@@ -1117,26 +1117,26 @@ function buildAdminProductsKeyboard(products) {
 function adminProductDetailText(product) {
   return [
     `SAN PHAM: ${product.name}`,
-    `Gia: ${product.price} ${product.currency || 'VND'}`,
-    `Ton kho: ${product.stock_quantity ?? '-'}`,
-    `Trang thai: ${product.is_active ? 'dang ban' : 'tam an'}`,
-    `Kieu giao: ${product.delivery_type === 'auto' ? 'auto' : 'thu cong'}`,
+    `Giá: ${product.price} ${product.currency || 'VND'}`,
+    `Tồn kho: ${product.stock_quantity ?? '-'}`,
+    `Trạng thái: ${product.is_active ? 'đang bán' : 'tạm ẩn'}`,
+    `Kiểu giao: ${product.delivery_type === 'auto' ? 'auto' : 'thủ công'}`,
     '',
-    'Tac vu nhanh: Sua gia, sua ton, bat/tat, them TK auto.',
+    'Tác vụ nhanh: Sửa giá, sửa tồn, bật/tắt, thêm TK auto.',
   ].join('\n');
 }
 
 function adminProductDetailKeyboard(product) {
   const toggleTo = product.is_active ? '0' : '1';
   return Markup.inlineKeyboard([
-    [Markup.button.callback(product.is_active ? 'Tam an san pham' : 'Mo ban lai', `prdtg:${product.id}:${toggleTo}`)],
-    [Markup.button.callback('Them TK auto (nhieu dong)', `admaddacc:${product.id}`)],
+    [Markup.button.callback(product.is_active ? 'Tạm ẩn sản phẩm' : 'Mở bán lại', `prdtg:${product.id}:${toggleTo}`)],
+    [Markup.button.callback('Thêm TK auto (nhiều dòng)', `admaddacc:${product.id}`)],
     [
-      Markup.button.callback('Sua gia', `admsetprice:${product.id}`),
-      Markup.button.callback('Sua ton', `admsetstock:${product.id}`),
+      Markup.button.callback('Sửa giá', `admsetprice:${product.id}`),
+      Markup.button.callback('Sửa tồn', `admsetstock:${product.id}`),
     ],
-    [Markup.button.callback('Xoa san pham', `admdelete:${product.id}`)],
-    [Markup.button.callback('Danh sach', 'admin_products_v2')],
+    [Markup.button.callback('Xóa sản phẩm', `admdelete:${product.id}`)],
+    [Markup.button.callback('Danh sách', 'admin_products_v2')],
   ]);
 }
 
@@ -1145,13 +1145,13 @@ async function sendAdminProductsPanel(ctx, shouldEdit = false) {
   if (products.length === 0) {
     if (shouldEdit) {
       try {
-        await ctx.editMessageText('Chua co san pham.');
+        await ctx.editMessageText('Chưa có sản phẩm.');
       } catch (error) {
-        await safeReply(ctx, 'Chua co san pham.');
+        await safeReply(ctx, 'Chưa có sản phẩm.');
       }
       return;
     }
-    await ctx.reply('Chua co san pham.');
+    await ctx.reply('Chưa có sản phẩm.');
     return;
   }
 
@@ -1230,9 +1230,9 @@ bot.command('support', async (ctx) => {
 
 bot.command('language', async (ctx) => {
   await ctx.reply(
-    'Chon ngon ngu / Choose language',
+    'Chọn ngôn ngữ / Choose language',
     Markup.inlineKeyboard([
-      [Markup.button.callback('Tieng Viet', 'lang:vi')],
+      [Markup.button.callback('Tiếng Việt', 'lang:vi')],
       [Markup.button.callback('English', 'lang:en')],
     ]),
   );
@@ -1273,11 +1273,11 @@ bot.action('admin_add_product_help', async (ctx) => {
 
   await ctx.answerCbQuery();
   await ctx.reply(
-    'Them san pham:\n'
+    'Thêm sản phẩm:\n'
     + '/listcategories\n'
     + '/addproduct <category_id>|<ten>|<gia>|<ton>|<currency>|<mo_ta>\n'
-    + 'Vi du:\n'
-    + '/addproduct 1111-2222|Tai khoan Premium|99000|10|VND|Su dung 30 ngay',
+    + 'Ví dụ:\n'
+    + '/addproduct 1111-2222|Tài khoản Premium|99000|10|VND|Sử dụng 30 ngày',
   );
 });
 
@@ -1292,11 +1292,11 @@ bot.action('admin_add_product_start', async (ctx) => {
   setPendingAdminInput(ctx, { type: 'add_product' });
   await ctx.answerCbQuery();
   await ctx.reply(
-    'Nhap san pham moi theo mau:\n'
+    'Nhập sản phẩm mới theo mẫu:\n'
     + 'category_id|ten|gia|ton|currency|mo_ta\n'
-    + 'Vi du:\n'
-    + '1111-2222|Tai khoan Premium|99000|10|VND|Su dung 30 ngay\n'
-    + 'Nhap /cancel de huy.',
+    + 'Ví dụ:\n'
+    + '1111-2222|Tài khoản Premium|99000|10|VND|Sử dụng 30 ngày\n'
+    + 'Nhập /cancel để hủy.',
   );
 });
 
@@ -1310,11 +1310,11 @@ bot.action('admin_notify_category_help', async (ctx) => {
 
   await ctx.answerCbQuery();
   await ctx.reply(
-    'Thong bao theo loai hang:\n'
+    'Thông báo theo loại hàng:\n'
     + '/listcategories\n'
     + '/notifycat <category_id> <noi_dung>\n'
-    + 'Vi du:\n'
-    + '/notifycat 1111-2222 Co deal moi cho nhom san pham nay!',
+    + 'Ví dụ:\n'
+    + '/notifycat 1111-2222 Có deal mới cho nhóm sản phẩm này!',
   );
 });
 
@@ -1366,9 +1366,9 @@ bot.command('notify', async (ctx) => {
 
   try {
     await bot.telegram.sendMessage(targetId, message);
-    await ctx.reply(`Da gui tin nhan toi ${targetId}.`);
+    await ctx.reply(`Đã gửi tin nhắn tới ${targetId}.`);
   } catch (error) {
-    await ctx.reply(`Gui that bai: ${error.message}`);
+    await ctx.reply(`Gửi thất bại: ${error.message}`);
   }
 });
 
@@ -1390,7 +1390,7 @@ bot.command('broadcast', async (ctx) => {
   try {
     ids = await getAllUserTelegramIds();
   } catch (error) {
-    await ctx.reply(`Khong tai duoc danh sach nguoi dung: ${error.message}`);
+    await ctx.reply(`Không tải được danh sách người dùng: ${error.message}`);
     return;
   }
 
@@ -1405,7 +1405,7 @@ bot.command('broadcast', async (ctx) => {
     }
   }
 
-  await ctx.reply(`Broadcast xong. Thanh cong: ${success}, that bai: ${failed}.`);
+  await ctx.reply(`Broadcast xong. Thành công: ${success}, thất bại: ${failed}.`);
 });
 
 
@@ -1419,12 +1419,12 @@ bot.command('listcategories', async (ctx) => {
 
   const categories = await loadAllCategories();
   if (categories.length === 0) {
-    await ctx.reply('Chua co category.');
+    await ctx.reply('Chưa có category.');
     return;
   }
 
   const lines = categories.map((c) => `${c.id} | ${c.name} | ${c.is_active ? 'active' : 'inactive'}`);
-  await ctx.reply(`Danh sach category (${categories.length}):\n${lines.join('\\n')}`);
+  await ctx.reply(`Danh sách category (${categories.length}):\n${lines.join('\\n')}`);
 });
 
 bot.command('addproduct', async (ctx) => {
@@ -1439,26 +1439,26 @@ bot.command('addproduct', async (ctx) => {
   const parsed = parseAddProductPayload(payload);
   if (!parsed.ok) {
     await ctx.reply(
-      'Sai cu phap.\n'
-      + 'Dung: /addproduct <category_id>|<ten>|<gia>|<ton>|<currency>|<mo_ta>\n'
-      + 'Vi du: /addproduct 1111-2222|Tai khoan Premium|99000|10|VND|Su dung 30 ngay',
+      'Sai cú pháp.\n'
+      + 'Dùng: /addproduct <category_id>|<ten>|<gia>|<ton>|<currency>|<mo_ta>\n'
+      + 'Ví dụ: /addproduct 1111-2222|Tài khoản Premium|99000|10|VND|Sử dụng 30 ngày',
     );
     return;
   }
 
   const category = await loadCategoryById(parsed.data.categoryId);
   if (!category) {
-    await ctx.reply('Khong tim thay category_id.');
+    await ctx.reply('Không tìm thấy category_id.');
     return;
   }
 
   const created = await createProduct(parsed.data);
   await ctx.reply(
-    `Da them san pham thanh cong.\n`
+    `Đã thêm sản phẩm thành công.\n`
     + `ID: ${created.id}\n`
-    + `Ten: ${created.name}\n`
-    + `Gia: ${created.price} ${created.currency}\n`
-    + `Ton: ${created.stock_quantity}\n`
+    + `Tên: ${created.name}\n`
+    + `Giá: ${created.price} ${created.currency}\n`
+    + `Tồn: ${created.stock_quantity}\n`
     + `Category: ${category.name}`,
   );
 });
@@ -1474,14 +1474,14 @@ bot.action('admin_bulk_update_start', async (ctx) => {
   setPendingAdminInput(ctx, { type: 'bulk_update_products' });
   await ctx.answerCbQuery();
   await ctx.reply(
-    'Nhap danh sach cap nhat nhieu san pham (moi dong 1 san pham):\n'
+    'Nhập danh sách cập nhật nhiều sản phẩm (mỗi dòng 1 sản phẩm):\n'
     + 'product_id|gia|ton|active(0/1)\n'
-    + 'active la tuy chon.\n\n'
-    + 'Vi du:\n'
+    + 'active là tùy chọn.\n\n'
+    + 'Ví dụ:\n'
     + '1111-2222|99000|20|1\n'
     + '3333-4444|49000|5|0\n'
     + '5555-6666|150000|10\n\n'
-    + 'Nhap /cancel de huy.',
+    + 'Nhập /cancel để hủy.',
   );
 });
 
@@ -1498,19 +1498,19 @@ bot.command('notifycat', async (ctx) => {
   const message = messageParts.join(' ').trim();
 
   if (!categoryId || !message) {
-    await ctx.reply('Dung: /notifycat <category_id> <noi_dung>');
+    await ctx.reply('Dùng: /notifycat <category_id> <noi_dung>');
     return;
   }
 
   const category = await loadCategoryById(categoryId);
   if (!category) {
-    await ctx.reply('Khong tim thay category_id.');
+    await ctx.reply('Không tìm thấy category_id.');
     return;
   }
 
   const targetIds = await getUserTelegramIdsByCategory(categoryId);
   if (targetIds.length === 0) {
-    await ctx.reply(`Khong co user nao da mua trong loai "${category.name}".`);
+    await ctx.reply(`Không có user nào đã mua trong loại "${category.name}".`);
     return;
   }
 
@@ -1525,7 +1525,7 @@ bot.command('notifycat', async (ctx) => {
     }
   }
 
-  await ctx.reply(`Notify category xong (${category.name}). Thanh cong: ${success}, that bai: ${failed}.`);
+  await ctx.reply(`Notify category xong (${category.name}). Thành công: ${success}, thất bại: ${failed}.`);
 });
 
 bot.action('menu_catalogue', async (ctx) => {
@@ -1572,7 +1572,7 @@ bot.action(/^prd:(.+)$/, async (ctx) => {
       Markup.button.callback('Mua x3', `buyq:${product.id}:3`),
       Markup.button.callback('Mua x5', `buyq:${product.id}:5`),
     ],
-    [Markup.button.callback('Nhap so luong', `buyqinput:${product.id}`)],
+    [Markup.button.callback('Nhập số lượng', `buyqinput:${product.id}`)],
     [Markup.button.callback('\uD83D\uDDD1 X\u00f3a', 'prd_close')],
   ]));
 });
@@ -1606,7 +1606,7 @@ bot.action(/^buyqinput:(.+)$/, async (ctx) => {
 
   pendingUserInputs.set(String(ctx.from.id), { type: 'buy_quantity', productId });
   await ctx.answerCbQuery();
-  await ctx.reply(`Nhap so luong can mua cho "${product.name}" (so nguyen >= 1).`);
+  await ctx.reply(`Nhập số lượng cần mua cho "${product.name}" (số nguyên >= 1).`);
 });
 
 bot.action('prd_close', async (ctx) => {
@@ -1709,7 +1709,7 @@ bot.action('admin_orders_new', async (ctx) => {
   const orders = await loadAdminOrders();
 
   if (orders.length === 0) {
-    await ctx.reply('Khong co don moi.');
+    await ctx.reply('Không có đơn mới.');
     return;
   }
 
@@ -1759,7 +1759,7 @@ bot.action(/^ordst:(.+):(draft|confirmed|paid|cancelled)$/, async (ctx) => {
     try {
       await bot.telegram.sendMessage(
         Number(owner.telegram_id),
-        `Don #${updated.id} cua ban da duoc cap nhat: ${updated.status}`,
+        `Đơn #${updated.id} của bạn đã được cập nhật: ${updated.status}`,
       );
     } catch (errorNotify) {
       // no-op
@@ -1788,11 +1788,11 @@ bot.action('admin_products', async (ctx) => {
 
   for (const product of products) {
     const nextActive = product.is_active ? '0' : '1';
-    const text = `${product.name} | ${product.price} ${product.currency || 'VND'} | ton:${product.stock_quantity ?? '-'} | ${product.is_active ? 'dang ban' : 'tam an'}`;
+    const text = `${product.name} | ${product.price} ${product.currency || 'VND'} | tồn:${product.stock_quantity ?? '-'} | ${product.is_active ? 'đang bán' : 'tạm ẩn'}`;
     await ctx.reply(
       text,
       Markup.inlineKeyboard([
-        [Markup.button.callback(product.is_active ? 'Tat' : 'Bat', `prdtg:${product.id}:${nextActive}`)],
+        [Markup.button.callback(product.is_active ? 'Tắt' : 'Bật', `prdtg:${product.id}:${nextActive}`)],
       ]),
     );
   }
@@ -1819,7 +1819,7 @@ bot.action(/^prdtg:(.+):(0|1)$/, async (ctx) => {
   }
 
   await ctx.answerCbQuery('OK');
-  await ctx.reply(`San pham ${productId} -> ${target ? 'dang ban' : 'tam an'}`);
+  await ctx.reply(`Sản phẩm ${productId} -> ${target ? 'đang bán' : 'tạm ẩn'}`);
 });
 
 bot.action('admin_products_v2', async (ctx) => {
@@ -1859,7 +1859,7 @@ bot.action('admin_products_close', async (ctx) => {
   try {
     await ctx.deleteMessage();
   } catch (error) {
-    await safeReply(ctx, 'Da dong panel quan ly.');
+    await safeReply(ctx, 'Đã đóng panel quản lý.');
   }
 });
 
@@ -1875,7 +1875,7 @@ bot.action(/^admprd:(.+)$/, async (ctx) => {
   const product = await loadProductAny(productId);
   if (!product) {
     await ctx.answerCbQuery('Not found');
-    await safeReply(ctx, 'Khong tim thay san pham.');
+    await safeReply(ctx, 'Không tìm thấy sản phẩm.');
     return;
   }
 
@@ -1901,8 +1901,8 @@ bot.action(/^admsetprice:(.+)$/, async (ctx) => {
   setPendingAdminInput(ctx, { type: 'edit_price', productId });
   await ctx.answerCbQuery();
   await ctx.reply(
-    `Nhap gia moi cho "${product.name}" (chi nhap so). Vi du: 120000\n`
-    + 'Nhap /cancel de huy.',
+    `Nhập giá mới cho "${product.name}" (chỉ nhập số). Ví dụ: 120000\n`
+    + 'Nhập /cancel để hủy.',
   );
 });
 
@@ -1924,11 +1924,11 @@ bot.action(/^admaddacc:(.+)$/, async (ctx) => {
   setPendingAdminInput(ctx, { type: 'add_accounts', productId });
   await ctx.answerCbQuery();
   await ctx.reply(
-    `Nhap danh sach tai khoan AUTO cho "${product.name}" (moi dong 1 tai khoan, dinh dang tu do).\n`
-    + 'Vi du:\n'
+    `Nhập danh sách tài khoản AUTO cho "${product.name}" (mỗi dòng 1 tài khoản, định dạng tự do).\n`
+    + 'Ví dụ:\n'
     + 'email1@gmail.com|MatKhau123|2FA:ABCD-EFGH\n'
     + 'email2@gmail.com|MatKhau456\n\n'
-    + 'Nhap /cancel de huy.',
+    + 'Nhập /cancel để hủy.',
   );
 });
 
@@ -1950,8 +1950,8 @@ bot.action(/^admsetstock:(.+)$/, async (ctx) => {
   setPendingAdminInput(ctx, { type: 'edit_stock', productId });
   await ctx.answerCbQuery();
   await ctx.reply(
-    `Nhap ton moi cho "${product.name}" (so nguyen >= 0). Vi du: 50\n`
-    + 'Nhap /cancel de huy.',
+    `Nhập tồn mới cho "${product.name}" (số nguyên >= 0). Ví dụ: 50\n`
+    + 'Nhập /cancel để hủy.',
   );
 });
 
@@ -1973,11 +1973,11 @@ bot.action(/^admdelete:(.+)$/, async (ctx) => {
   try {
     await hardDeleteProduct(productId);
     await ctx.answerCbQuery('Deleted');
-    await ctx.reply(`Da xoa san pham: ${product.name}`);
+    await ctx.reply(`Đã xóa sản phẩm: ${product.name}`);
   } catch (error) {
     await updateAdminProduct(productId, { is_active: false });
     await ctx.answerCbQuery('Disabled');
-    await ctx.reply(`San pham co lien ket don hang, da chuyen tam an: ${product.name}`);
+    await ctx.reply(`Sản phẩm có liên kết đơn hàng, đã chuyển tạm ẩn: ${product.name}`);
   }
 });
 
@@ -1989,14 +1989,14 @@ bot.on('text', async (ctx, next) => {
     const text = (ctx.message?.text || '').trim();
     if (/^\/cancel\b/i.test(text)) {
       pendingUserInputs.delete(String(ctx.from.id));
-      await ctx.reply('Da huy thao tac.');
+      await ctx.reply('Đã hủy thao tác.');
       return;
     }
 
     if (userPending.type === 'buy_quantity') {
       const quantity = parseNonNegativeInt(text);
       if (quantity === null || quantity < 1) {
-        await ctx.reply('So luong khong hop le. Hay nhap so nguyen >= 1.');
+        await ctx.reply('Số lượng không hợp lệ. Hãy nhập số nguyên >= 1.');
         return;
       }
 
@@ -2030,7 +2030,7 @@ bot.on('text', async (ctx, next) => {
 
   if (/^\/cancel\b/i.test(text)) {
     clearPendingAdminInput(ctx);
-    await ctx.reply('Da huy thao tac.');
+    await ctx.reply('Đã hủy thao tác.');
     return;
   }
 
@@ -2042,22 +2042,22 @@ bot.on('text', async (ctx, next) => {
     if (pending.type === 'add_product') {
       const parsed = parseAddProductPayload(text);
       if (!parsed.ok) {
-        await ctx.reply('Sai cu phap. Mau: category_id|ten|gia|ton|currency|mo_ta');
+        await ctx.reply('Sai cú pháp. Mẫu: category_id|ten|gia|ton|currency|mo_ta');
         return;
       }
 
       const category = await loadCategoryById(parsed.data.categoryId);
       if (!category) {
-        await ctx.reply('Khong tim thay category_id.');
+        await ctx.reply('Không tìm thấy category_id.');
         return;
       }
 
       const created = await createProduct(parsed.data);
       clearPendingAdminInput(ctx);
       await ctx.reply(
-        `Da them san pham: ${created.name}\n`
-        + `Gia: ${created.price} ${created.currency}\n`
-        + `Ton: ${created.stock_quantity}`,
+        `Đã thêm sản phẩm: ${created.name}\n`
+        + `Giá: ${created.price} ${created.currency}\n`
+        + `Tồn: ${created.stock_quantity}`,
       );
       await sendAdminProductsPanel(ctx);
       return;
@@ -2066,13 +2066,13 @@ bot.on('text', async (ctx, next) => {
     if (pending.type === 'edit_price') {
       const value = parsePositiveMoney(text);
       if (value === null) {
-        await ctx.reply('Gia khong hop le. Hay nhap so duong, vi du 120000.');
+        await ctx.reply('Giá không hợp lệ. Hãy nhập số dương, ví dụ 120000.');
         return;
       }
 
       const updated = await updateAdminProduct(pending.productId, { price: value });
       clearPendingAdminInput(ctx);
-      await ctx.reply(`Da cap nhat gia: ${updated.name} -> ${updated.price} ${updated.currency || 'VND'}`);
+      await ctx.reply(`Đã cập nhật giá: ${updated.name} -> ${updated.price} ${updated.currency || 'VND'}`);
       await ctx.reply(adminProductDetailText(updated), adminProductDetailKeyboard(updated));
       return;
     }
@@ -2080,13 +2080,13 @@ bot.on('text', async (ctx, next) => {
     if (pending.type === 'edit_stock') {
       const value = parseNonNegativeInt(text);
       if (value === null) {
-        await ctx.reply('Ton khong hop le. Hay nhap so nguyen >= 0, vi du 50.');
+        await ctx.reply('Tồn không hợp lệ. Hãy nhập số nguyên >= 0, ví dụ 50.');
         return;
       }
 
       const updated = await updateAdminProduct(pending.productId, { stock_quantity: value });
       clearPendingAdminInput(ctx);
-      await ctx.reply(`Da cap nhat ton: ${updated.name} -> ${updated.stock_quantity}`);
+      await ctx.reply(`Đã cập nhật tồn: ${updated.name} -> ${updated.stock_quantity}`);
       await ctx.reply(adminProductDetailText(updated), adminProductDetailKeyboard(updated));
       return;
     }
@@ -2094,7 +2094,7 @@ bot.on('text', async (ctx, next) => {
     if (pending.type === 'bulk_update_products') {
       const parsed = parseBulkProductUpdates(text);
       if (parsed.total === 0) {
-        await ctx.reply('Khong co dong hop le. Hay nhap theo mau product_id|gia|ton|active(0/1).');
+        await ctx.reply('Không có dòng hợp lệ. Hãy nhập theo mẫu product_id|gia|ton|active(0/1).');
         return;
       }
 
@@ -2111,12 +2111,12 @@ bot.on('text', async (ctx, next) => {
 
       clearPendingAdminInput(ctx);
       await ctx.reply(
-        `Cap nhat nhieu san pham xong.\n`
-        + `Tong dong: ${parsed.total}\n`
-        + `Hop le: ${parsed.updates.length}\n`
-        + `Thanh cong: ${success}\n`
-        + `That bai: ${failed}\n`
-        + `Sai cu phap: ${parsed.invalidLines.length}`,
+        `Cập nhật nhiều sản phẩm xong.\n`
+        + `Tổng dòng: ${parsed.total}\n`
+        + `Hợp lệ: ${parsed.updates.length}\n`
+        + `Thành công: ${success}\n`
+        + `Thất bại: ${failed}\n`
+        + `Sai cú pháp: ${parsed.invalidLines.length}`,
       );
       await sendAdminProductsPanel(ctx);
       return;
@@ -2126,22 +2126,22 @@ bot.on('text', async (ctx, next) => {
       const product = await loadProductAny(pending.productId);
       if (!product) {
         clearPendingAdminInput(ctx);
-        await ctx.reply('Khong tim thay san pham.');
+        await ctx.reply('Không tìm thấy sản phẩm.');
         return;
       }
 
       const result = await addProductAccountsBulk(pending.productId, text);
       clearPendingAdminInput(ctx);
       await ctx.reply(
-        `Da xu ly ${result.total} dong cho "${product.name}".\n`
-        + `Them moi: ${result.added}\n`
-        + `Bo qua (trung): ${result.skipped}`,
+        `Đã xử lý ${result.total} dòng cho "${product.name}".\n`
+        + `Thêm mới: ${result.added}\n`
+        + `Bỏ qua (trùng): ${result.skipped}`,
       );
       return;
     }
   } catch (error) {
     clearPendingAdminInput(ctx);
-    await safeReply(ctx, `Xu ly that bai: ${error.message}`);
+    await safeReply(ctx, `Xử lý thất bại: ${error.message}`);
     return;
   }
 
@@ -2170,7 +2170,7 @@ bot.action('admin_reports', async (ctx) => {
 
 bot.catch(async (err, ctx) => {
   try {
-    await ctx.reply('Co loi xay ra. Vui long thu lai sau.');
+    await ctx.reply('Có lỗi xảy ra. Vui lòng thử lại sau.');
   } catch (nestedError) {
     // no-op
   }
@@ -2186,6 +2186,7 @@ bot.launch().then(async () => {
 });
 
 module.exports = bot;
+
 
 
 
