@@ -27,6 +27,8 @@ create table if not exists public.products (
   name text not null,
   slug text unique,
   description text,
+  delivery_type text not null default 'manual' check (delivery_type in ('auto', 'manual')),
+  manual_contact_note text,
   price numeric(12,2) not null default 0,
   currency text not null default 'VND',
   media_url text,
@@ -34,6 +36,50 @@ create table if not exists public.products (
   is_active boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
+);
+
+alter table public.products
+  add column if not exists delivery_type text not null default 'manual';
+
+alter table public.products
+  add column if not exists manual_contact_note text;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'products_delivery_type_check'
+  ) then
+    alter table public.products
+      add constraint products_delivery_type_check
+      check (delivery_type in ('auto', 'manual'));
+  end if;
+end
+$$;
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'products_stock_quantity_non_negative_check'
+  ) then
+    alter table public.products
+      add constraint products_stock_quantity_non_negative_check
+      check (stock_quantity >= 0);
+  end if;
+end
+$$;
+
+create table if not exists public.product_accounts (
+  id uuid primary key default gen_random_uuid(),
+  product_id uuid not null references public.products(id) on delete cascade,
+  account_data text not null,
+  is_used boolean not null default false,
+  used_order_id uuid,
+  used_at timestamptz,
+  created_at timestamptz not null default now()
 );
 
 create table if not exists public.orders (
@@ -48,6 +94,22 @@ create table if not exists public.orders (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+do $$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'product_accounts_used_order_id_fkey'
+  ) then
+    alter table public.product_accounts
+      add constraint product_accounts_used_order_id_fkey
+      foreign key (used_order_id)
+      references public.orders(id)
+      on delete set null;
+  end if;
+end
+$$;
 
 create table if not exists public.order_items (
   id uuid primary key default gen_random_uuid(),
@@ -83,6 +145,9 @@ create index if not exists idx_orders_user_id on public.orders (user_id);
 create index if not exists idx_orders_status on public.orders (status);
 create index if not exists idx_products_category_id on public.products (category_id);
 create index if not exists idx_products_is_active on public.products (is_active);
+create index if not exists idx_product_accounts_product_id on public.product_accounts (product_id);
+create index if not exists idx_product_accounts_is_used on public.product_accounts (is_used);
+create unique index if not exists uq_support_channels_type_value on public.support_channels (type, value);
 
 create or replace function public.set_updated_at()
 returns trigger
@@ -117,6 +182,7 @@ for each row execute function public.set_updated_at();
 alter table public.users enable row level security;
 alter table public.categories enable row level security;
 alter table public.products enable row level security;
+alter table public.product_accounts enable row level security;
 alter table public.orders enable row level security;
 alter table public.order_items enable row level security;
 alter table public.order_history enable row level security;
@@ -138,6 +204,9 @@ create policy p_products_read on public.products for select using (is_active = t
 
 drop policy if exists p_products_write on public.products;
 create policy p_products_write on public.products for all using (true) with check (true);
+
+drop policy if exists p_product_accounts_all on public.product_accounts;
+create policy p_product_accounts_all on public.product_accounts for all using (true) with check (true);
 
 drop policy if exists p_orders_all on public.orders;
 create policy p_orders_all on public.orders for all using (true) with check (true);
