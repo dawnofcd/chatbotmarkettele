@@ -162,7 +162,7 @@ const adminMenu = Markup.inlineKeyboard([
   [Markup.button.callback('Thống kê', 'admin_reports')],
   [
     Markup.button.callback('Thêm sản phẩm', 'admin_add_product_help'),
-    Markup.button.callback('Thông báo theo loại', 'admin_notify_category_help'),
+    Markup.button.callback('Fill tồn kho', 'admin_fill_stock_help'),
   ],
   [Markup.button.callback('Cập nhật nhiều SP', 'admin_bulk_update_start')],
 ]);
@@ -262,14 +262,6 @@ function getCommandPayload(text, command) {
   return (text || '').replace(pattern, '').trim();
 }
 
-function chunkArray(items, chunkSize) {
-  const chunks = [];
-  for (let i = 0; i < items.length; i += chunkSize) {
-    chunks.push(items.slice(i, i + chunkSize));
-  }
-  return chunks;
-}
-
 function slugifyName(name) {
   return String(name || '')
     .toLowerCase()
@@ -281,24 +273,25 @@ function slugifyName(name) {
 
 function parseAddProductPayload(payload) {
   const parts = payload.split('|').map((p) => p.trim());
-  const [categoryId, name, priceRaw, stockRaw, currencyRaw, ...descriptionParts] = parts;
-  const description = descriptionParts.join('|').trim();
+  const [name, priceRaw, currencyRaw, deliveryRaw, ...descriptionParts] = parts;
   const price = Number(priceRaw);
-  const stock = Number(stockRaw);
   const currency = (currencyRaw || 'VND').toUpperCase();
+  const deliveryType = ['auto', 'manual'].includes(String(deliveryRaw || '').toLowerCase())
+    ? String(deliveryRaw).toLowerCase()
+    : 'auto';
+  const description = descriptionParts.join('|').trim();
 
-  if (!categoryId || !name || !Number.isFinite(price) || !Number.isInteger(stock)) {
+  if (!name || !Number.isFinite(price) || price < 0) {
     return { ok: false };
   }
 
   return {
     ok: true,
     data: {
-      categoryId,
       name,
       price,
-      stock,
       currency,
+      deliveryType,
       description,
     },
   };
@@ -353,6 +346,22 @@ function parseBulkProductUpdates(input) {
   return { updates, invalidLines, total: lines.length };
 }
 
+function parseAccountUpdatePayload(input) {
+  const text = String(input || '').trim();
+  const sepIndex = text.indexOf('|');
+  if (sepIndex <= 0) {
+    return null;
+  }
+
+  const accountId = text.slice(0, sepIndex).trim();
+  const accountData = text.slice(sepIndex + 1).trim();
+  if (!accountId || !accountData) {
+    return null;
+  }
+
+  return { accountId, accountData };
+}
+
 async function getAllUserTelegramIds() {
   const pageSize = 500;
   let from = 0;
@@ -382,64 +391,6 @@ async function getAllUserTelegramIds() {
   }
 
   return [...new Set(ids)];
-}
-
-async function loadActiveCategories() {
-  const { data, error } = await db
-    .from('categories')
-    .select('id,name')
-    .eq('is_active', true)
-    .order('name', { ascending: true });
-
-  if (error) {
-    throw error;
-  }
-
-  return data || [];
-}
-
-async function loadAllCategories() {
-  const { data, error } = await db
-    .from('categories')
-    .select('id,name,is_active')
-    .order('name', { ascending: true })
-    .limit(200);
-
-  if (error) {
-    throw error;
-  }
-
-  return data || [];
-}
-
-async function loadCategoryById(categoryId) {
-  const { data, error } = await db
-    .from('categories')
-    .select('id,name,is_active')
-    .eq('id', categoryId)
-    .maybeSingle();
-
-  if (error) {
-    throw error;
-  }
-
-  return data;
-}
-
-async function loadProductsByCategory(categoryId) {
-  const { data, error } = await db
-    .from('products')
-    .select('id,name,description,delivery_type,manual_contact_note,price,currency,stock_quantity,is_active')
-    .eq('category_id', categoryId)
-    .eq('is_active', true)
-    .order('name', { ascending: true })
-    .limit(50);
-
-  if (error) {
-    throw error;
-  }
-
-  return data || [];
 }
 
 async function loadActiveProducts(limit = 50) {
@@ -475,7 +426,7 @@ async function loadProduct(productId) {
 async function loadProductAny(productId) {
   const { data, error } = await db
     .from('products')
-    .select('id,category_id,name,description,delivery_type,manual_contact_note,price,currency,stock_quantity,is_active')
+    .select('id,name,description,delivery_type,manual_contact_note,price,currency,stock_quantity,is_active')
     .eq('id', productId)
     .maybeSingle();
 
@@ -492,15 +443,15 @@ async function createProduct(input) {
   const { data, error } = await db
     .from('products')
     .insert({
-      category_id: input.categoryId,
+      category_id: null,
       name: input.name,
       slug,
       description: input.description || null,
-      delivery_type: 'manual',
+      delivery_type: input.deliveryType || 'auto',
       manual_contact_note: 'Sau khi chuy\u1ec3n kho\u1ea3n th\u00e0nh c\u00f4ng, vui l\u00f2ng nh\u1eafn admin \u0111\u1ec3 \u0111\u01b0\u1ee3c c\u1ea5p t\u00e0i kho\u1ea3n.',
       price: input.price,
       currency: input.currency || 'VND',
-      stock_quantity: input.stock,
+      stock_quantity: 0,
       is_active: true,
     })
     .select('id,name,price,currency,stock_quantity')
@@ -550,6 +501,81 @@ async function addProductAccountsBulk(productId, accountLines) {
   };
 }
 
+async function syncProductStockFromAutoAccounts(productId) {
+  const { count, error: countError } = await db
+    .from('product_accounts')
+    .select('id', { count: 'exact', head: true })
+    .eq('product_id', productId)
+    .eq('is_used', false);
+
+  if (countError) {
+    throw countError;
+  }
+
+  const stock = Number.isInteger(count) ? count : 0;
+  const { data, error: updateError } = await db
+    .from('products')
+    .update({ stock_quantity: stock })
+    .eq('id', productId)
+    .select('id,name,stock_quantity')
+    .maybeSingle();
+
+  if (updateError) {
+    throw updateError;
+  }
+
+  return data || { id: productId, stock_quantity: stock };
+}
+
+async function loadProductAccounts(productId, limit = 20) {
+  const { data, error } = await db
+    .from('product_accounts')
+    .select('id,account_data,is_used,created_at,used_at')
+    .eq('product_id', productId)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
+async function updateProductAccountData(productId, accountId, accountData) {
+  const { data, error } = await db
+    .from('product_accounts')
+    .update({ account_data: accountData })
+    .eq('id', accountId)
+    .eq('product_id', productId)
+    .eq('is_used', false)
+    .select('id,account_data,is_used')
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+async function deleteProductAccount(productId, accountId) {
+  const { data, error } = await db
+    .from('product_accounts')
+    .delete()
+    .eq('id', accountId)
+    .eq('product_id', productId)
+    .eq('is_used', false)
+    .select('id')
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
 async function claimAutoAccount(productId, orderId) {
   const { data: accountRow, error: selectError } = await db
     .from('product_accounts')
@@ -585,94 +611,6 @@ async function claimAutoAccount(productId, orderId) {
   }
 
   return lockedRow || null;
-}
-
-async function getUserTelegramIdsByCategory(categoryId) {
-  const { data: products, error: productsError } = await db
-    .from('products')
-    .select('id')
-    .eq('category_id', categoryId)
-    .limit(5000);
-
-  if (productsError) {
-    throw productsError;
-  }
-
-  const productIds = (products || []).map((row) => row.id).filter(Boolean);
-  if (productIds.length === 0) {
-    return [];
-  }
-
-  const orderIdSet = new Set();
-  for (const productChunk of chunkArray(productIds, 200)) {
-    const { data: items, error: itemsError } = await db
-      .from('order_items')
-      .select('order_id')
-      .in('product_id', productChunk)
-      .limit(5000);
-
-    if (itemsError) {
-      throw itemsError;
-    }
-
-    for (const row of items || []) {
-      if (row.order_id) {
-        orderIdSet.add(row.order_id);
-      }
-    }
-  }
-
-  const orderIds = [...orderIdSet];
-  if (orderIds.length === 0) {
-    return [];
-  }
-
-  const userIdSet = new Set();
-  for (const orderChunk of chunkArray(orderIds, 200)) {
-    const { data: orders, error: ordersError } = await db
-      .from('orders')
-      .select('user_id')
-      .in('id', orderChunk)
-      .limit(5000);
-
-    if (ordersError) {
-      throw ordersError;
-    }
-
-    for (const row of orders || []) {
-      if (row.user_id) {
-        userIdSet.add(row.user_id);
-      }
-    }
-  }
-
-  const userIds = [...userIdSet];
-  if (userIds.length === 0) {
-    return [];
-  }
-
-  const telegramIdSet = new Set();
-  for (const userChunk of chunkArray(userIds, 200)) {
-    const { data: users, error: usersError } = await db
-      .from('users')
-      .select('telegram_id')
-      .in('id', userChunk)
-      .not('telegram_id', 'is', null)
-      .limit(5000);
-
-    if (usersError) {
-      throw usersError;
-    }
-
-    for (const row of users || []) {
-      const tg = Number(row.telegram_id);
-      if (Number.isInteger(tg)) {
-        telegramIdSet.add(tg);
-      }
-    }
-  }
-
-  return [...telegramIdSet];
 }
 
 async function createSingleItemOrder(userId, product, quantity = 1) {
@@ -1122,7 +1060,8 @@ function adminProductDetailText(product) {
     `Trạng thái: ${product.is_active ? 'đang bán' : 'tạm ẩn'}`,
     `Kiểu giao: ${product.delivery_type === 'auto' ? 'auto' : 'thủ công'}`,
     '',
-    'Tác vụ nhanh: Sửa giá, sửa tồn, bật/tắt, thêm TK auto.',
+    'CRUD: Sửa giá, sửa tồn, bật/tắt, xóa sản phẩm.',
+    'Kho AUTO: thêm 1, thêm nhiều, xem, sửa, xóa tài khoản.',
   ].join('\n');
 }
 
@@ -1130,7 +1069,14 @@ function adminProductDetailKeyboard(product) {
   const toggleTo = product.is_active ? '0' : '1';
   return Markup.inlineKeyboard([
     [Markup.button.callback(product.is_active ? 'Tạm ẩn sản phẩm' : 'Mở bán lại', `prdtg:${product.id}:${toggleTo}`)],
-    [Markup.button.callback('Thêm TK auto (nhiều dòng)', `admaddacc:${product.id}`)],
+    [
+      Markup.button.callback('Thêm 1 TK', `admaddacc1:${product.id}`),
+      Markup.button.callback('Thêm nhiều TK', `admaddacc:${product.id}`),
+    ],
+    [
+      Markup.button.callback('Xem kho AUTO', `admviewacc:${product.id}`),
+      Markup.button.callback('Sửa/Xóa TK', `admstockcrud:${product.id}`),
+    ],
     [
       Markup.button.callback('Sửa giá', `admsetprice:${product.id}`),
       Markup.button.callback('Sửa tồn', `admsetstock:${product.id}`),
@@ -1274,10 +1220,9 @@ bot.action('admin_add_product_help', async (ctx) => {
   await ctx.answerCbQuery();
   await ctx.reply(
     'Thêm sản phẩm:\n'
-    + '/listcategories\n'
-    + '/addproduct <category_id>|<ten>|<gia>|<ton>|<currency>|<mo_ta>\n'
+    + '/addproduct <ten>|<gia>|<currency>|<delivery:auto|manual>|<mo_ta>\n'
     + 'Ví dụ:\n'
-    + '/addproduct 1111-2222|Tài khoản Premium|99000|10|VND|Sử dụng 30 ngày',
+    + '/addproduct Tài khoản Premium|99000|VND|auto|Sử dụng 30 ngày',
   );
 });
 
@@ -1293,14 +1238,14 @@ bot.action('admin_add_product_start', async (ctx) => {
   await ctx.answerCbQuery();
   await ctx.reply(
     'Nhập sản phẩm mới theo mẫu:\n'
-    + 'category_id|ten|gia|ton|currency|mo_ta\n'
+    + 'ten|gia|currency|delivery(auto/manual)|mo_ta\n'
     + 'Ví dụ:\n'
-    + '1111-2222|Tài khoản Premium|99000|10|VND|Sử dụng 30 ngày\n'
+    + 'Tài khoản Premium|99000|VND|auto|Sử dụng 30 ngày\n'
     + 'Nhập /cancel để hủy.',
   );
 });
 
-bot.action('admin_notify_category_help', async (ctx) => {
+bot.action('admin_fill_stock_help', async (ctx) => {
   const user = await ensureUser(ctx);
   const locale = getLocale(user);
   if (!isAdmin(ctx, user)) {
@@ -1310,11 +1255,13 @@ bot.action('admin_notify_category_help', async (ctx) => {
 
   await ctx.answerCbQuery();
   await ctx.reply(
-    'Thông báo theo loại hàng:\n'
-    + '/listcategories\n'
-    + '/notifycat <category_id> <noi_dung>\n'
-    + 'Ví dụ:\n'
-    + '/notifycat 1111-2222 Có deal mới cho nhóm sản phẩm này!',
+    'Fill tồn kho theo sản phẩm:\n'
+    + '1) Mở Admin -> Sản phẩm -> chọn 1 sản phẩm.\n'
+    + '2) Dùng "Thêm 1 TK" nếu nhập ít.\n'
+    + '3) Dùng "Thêm nhiều TK" nếu nhập nhiều dòng.\n'
+    + '4) Dùng "Xem kho AUTO" để đọc danh sách.\n'
+    + '5) Dùng "Sửa/Xóa TK" để CRUD từng tài khoản.\n'
+    + '6) Bot tự đồng bộ tồn kho sau mỗi thao tác.',
   );
 });
 
@@ -1409,24 +1356,6 @@ bot.command('broadcast', async (ctx) => {
 });
 
 
-bot.command('listcategories', async (ctx) => {
-  const user = await ensureUser(ctx);
-  const locale = getLocale(user);
-  if (!isAdmin(ctx, user)) {
-    await ctx.reply(t(locale, 'noAdmin'));
-    return;
-  }
-
-  const categories = await loadAllCategories();
-  if (categories.length === 0) {
-    await ctx.reply('Chưa có category.');
-    return;
-  }
-
-  const lines = categories.map((c) => `${c.id} | ${c.name} | ${c.is_active ? 'active' : 'inactive'}`);
-  await ctx.reply(`Danh sách category (${categories.length}):\n${lines.join('\\n')}`);
-});
-
 bot.command('addproduct', async (ctx) => {
   const user = await ensureUser(ctx);
   const locale = getLocale(user);
@@ -1440,15 +1369,9 @@ bot.command('addproduct', async (ctx) => {
   if (!parsed.ok) {
     await ctx.reply(
       'Sai cú pháp.\n'
-      + 'Dùng: /addproduct <category_id>|<ten>|<gia>|<ton>|<currency>|<mo_ta>\n'
-      + 'Ví dụ: /addproduct 1111-2222|Tài khoản Premium|99000|10|VND|Sử dụng 30 ngày',
+      + 'Dùng: /addproduct <ten>|<gia>|<currency>|<delivery:auto|manual>|<mo_ta>\n'
+      + 'Ví dụ: /addproduct Tài khoản Premium|99000|VND|auto|Sử dụng 30 ngày',
     );
-    return;
-  }
-
-  const category = await loadCategoryById(parsed.data.categoryId);
-  if (!category) {
-    await ctx.reply('Không tìm thấy category_id.');
     return;
   }
 
@@ -1458,8 +1381,7 @@ bot.command('addproduct', async (ctx) => {
     + `ID: ${created.id}\n`
     + `Tên: ${created.name}\n`
     + `Giá: ${created.price} ${created.currency}\n`
-    + `Tồn: ${created.stock_quantity}\n`
-    + `Category: ${category.name}`,
+    + `Tồn: ${created.stock_quantity}`,
   );
 });
 
@@ -1485,72 +1407,11 @@ bot.action('admin_bulk_update_start', async (ctx) => {
   );
 });
 
-bot.command('notifycat', async (ctx) => {
-  const user = await ensureUser(ctx);
-  const locale = getLocale(user);
-  if (!isAdmin(ctx, user)) {
-    await ctx.reply(t(locale, 'noAdmin'));
-    return;
-  }
-
-  const payload = getCommandPayload(ctx.message.text, 'notifycat');
-  const [categoryId, ...messageParts] = payload.split(/\s+/);
-  const message = messageParts.join(' ').trim();
-
-  if (!categoryId || !message) {
-    await ctx.reply('Dùng: /notifycat <category_id> <noi_dung>');
-    return;
-  }
-
-  const category = await loadCategoryById(categoryId);
-  if (!category) {
-    await ctx.reply('Không tìm thấy category_id.');
-    return;
-  }
-
-  const targetIds = await getUserTelegramIdsByCategory(categoryId);
-  if (targetIds.length === 0) {
-    await ctx.reply(`Không có user nào đã mua trong loại "${category.name}".`);
-    return;
-  }
-
-  let success = 0;
-  let failed = 0;
-  for (const telegramId of targetIds) {
-    try {
-      await bot.telegram.sendMessage(telegramId, `[${category.name}] ${message}`);
-      success += 1;
-    } catch (error) {
-      failed += 1;
-    }
-  }
-
-  await ctx.reply(`Notify category xong (${category.name}). Thành công: ${success}, thất bại: ${failed}.`);
-});
-
 bot.action('menu_catalogue', async (ctx) => {
   const user = await ensureUser(ctx);
   const locale = getLocale(user);
   await ctx.answerCbQuery();
   await sendCataloguePanel(ctx, locale);
-});
-
-bot.action(/^cat:(.+)$/, async (ctx) => {
-  const user = await ensureUser(ctx);
-  const locale = getLocale(user);
-  const categoryId = ctx.match[1];
-  await ctx.answerCbQuery();
-
-  const products = await loadProductsByCategory(categoryId);
-  if (products.length === 0) {
-    await safeReply(ctx, t(locale, 'emptyCatalogue'));
-    return;
-  }
-
-  const rows = products.map((p) => [Markup.button.callback(`${p.name} - ${p.price} ${p.currency || 'VND'}`, `prd:${p.id}`)]);
-  rows.push([Markup.button.callback(locale === 'en' ? 'Back to menu' : 'V\u1ec1 menu', 'menu_catalogue')]);
-
-  await ctx.reply(locale === 'en' ? 'Products:' : 'S\u1ea3n ph\u1ea9m:', Markup.inlineKeyboard(rows));
 });
 
 bot.action(/^prd:(.+)$/, async (ctx) => {
@@ -1906,6 +1767,30 @@ bot.action(/^admsetprice:(.+)$/, async (ctx) => {
   );
 });
 
+bot.action(/^admaddacc1:(.+)$/, async (ctx) => {
+  const user = await ensureUser(ctx);
+  const locale = getLocale(user);
+  if (!isAdmin(ctx, user)) {
+    await ctx.answerCbQuery(t(locale, 'noAdmin'), { show_alert: true });
+    return;
+  }
+
+  const productId = ctx.match[1];
+  const product = await loadProductAny(productId);
+  if (!product) {
+    await ctx.answerCbQuery('Not found');
+    return;
+  }
+
+  setPendingAdminInput(ctx, { type: 'add_one_account', productId });
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    `Nhập 1 tài khoản AUTO cho "${product.name}" (định dạng tự do).\n`
+    + 'Ví dụ: email@gmail.com|MatKhau123|2FA:ABCD-EFGH\n'
+    + 'Nhập /cancel để hủy.',
+  );
+});
+
 bot.action(/^admaddacc:(.+)$/, async (ctx) => {
   const user = await ensureUser(ctx);
   const locale = getLocale(user);
@@ -1928,6 +1813,113 @@ bot.action(/^admaddacc:(.+)$/, async (ctx) => {
     + 'Ví dụ:\n'
     + 'email1@gmail.com|MatKhau123|2FA:ABCD-EFGH\n'
     + 'email2@gmail.com|MatKhau456\n\n'
+    + 'Nhập /cancel để hủy.',
+  );
+});
+
+bot.action(/^admviewacc:(.+)$/, async (ctx) => {
+  const user = await ensureUser(ctx);
+  const locale = getLocale(user);
+  if (!isAdmin(ctx, user)) {
+    await ctx.answerCbQuery(t(locale, 'noAdmin'), { show_alert: true });
+    return;
+  }
+
+  const productId = ctx.match[1];
+  const product = await loadProductAny(productId);
+  if (!product) {
+    await ctx.answerCbQuery('Not found');
+    return;
+  }
+
+  const rows = await loadProductAccounts(productId, 20);
+  await ctx.answerCbQuery();
+  if (rows.length === 0) {
+    await ctx.reply(`Kho AUTO của "${product.name}" đang trống.`);
+    return;
+  }
+
+  const lines = rows.map((row, idx) => {
+    const status = row.is_used ? 'used' : 'unused';
+    return `${idx + 1}. [${status}] ${row.id} | ${row.account_data}`;
+  });
+  await ctx.reply(
+    `Kho AUTO của "${product.name}" (tối đa 20 dòng mới nhất):\n${lines.join('\n')}`,
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback('Sửa 1 TK', `admstockedit:${productId}`),
+        Markup.button.callback('Xóa 1 TK', `admstockdelete:${productId}`),
+      ],
+    ]),
+  );
+});
+
+bot.action(/^admstockcrud:(.+)$/, async (ctx) => {
+  const user = await ensureUser(ctx);
+  const locale = getLocale(user);
+  if (!isAdmin(ctx, user)) {
+    await ctx.answerCbQuery(t(locale, 'noAdmin'), { show_alert: true });
+    return;
+  }
+  const productId = ctx.match[1];
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    'Chọn thao tác kho AUTO:',
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback('Xem kho', `admviewacc:${productId}`),
+        Markup.button.callback('Sửa 1 TK', `admstockedit:${productId}`),
+      ],
+      [
+        Markup.button.callback('Xóa 1 TK', `admstockdelete:${productId}`),
+        Markup.button.callback('Thêm 1 TK', `admaddacc1:${productId}`),
+      ],
+    ]),
+  );
+});
+
+bot.action(/^admstockedit:(.+)$/, async (ctx) => {
+  const user = await ensureUser(ctx);
+  const locale = getLocale(user);
+  if (!isAdmin(ctx, user)) {
+    await ctx.answerCbQuery(t(locale, 'noAdmin'), { show_alert: true });
+    return;
+  }
+  const productId = ctx.match[1];
+  const product = await loadProductAny(productId);
+  if (!product) {
+    await ctx.answerCbQuery('Not found');
+    return;
+  }
+  setPendingAdminInput(ctx, { type: 'edit_account_data', productId });
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    `Sửa tài khoản AUTO của "${product.name}".\n`
+    + 'Nhập theo mẫu: account_id|du_lieu_moi\n'
+    + 'Ví dụ: 1111-2222-3333-4444|email@gmail.com|MatKhauMoi|2FA:XYZ\n'
+    + 'Chỉ sửa được tài khoản chưa dùng.\n'
+    + 'Nhập /cancel để hủy.',
+  );
+});
+
+bot.action(/^admstockdelete:(.+)$/, async (ctx) => {
+  const user = await ensureUser(ctx);
+  const locale = getLocale(user);
+  if (!isAdmin(ctx, user)) {
+    await ctx.answerCbQuery(t(locale, 'noAdmin'), { show_alert: true });
+    return;
+  }
+  const productId = ctx.match[1];
+  const product = await loadProductAny(productId);
+  if (!product) {
+    await ctx.answerCbQuery('Not found');
+    return;
+  }
+  setPendingAdminInput(ctx, { type: 'delete_account', productId });
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    `Xóa tài khoản AUTO của "${product.name}".\n`
+    + 'Nhập account_id cần xóa (chỉ xóa được tài khoản chưa dùng).\n'
     + 'Nhập /cancel để hủy.',
   );
 });
@@ -2042,13 +2034,7 @@ bot.on('text', async (ctx, next) => {
     if (pending.type === 'add_product') {
       const parsed = parseAddProductPayload(text);
       if (!parsed.ok) {
-        await ctx.reply('Sai cú pháp. Mẫu: category_id|ten|gia|ton|currency|mo_ta');
-        return;
-      }
-
-      const category = await loadCategoryById(parsed.data.categoryId);
-      if (!category) {
-        await ctx.reply('Không tìm thấy category_id.');
+        await ctx.reply('Sai cú pháp. Mẫu: ten|gia|currency|delivery(auto/manual)|mo_ta');
         return;
       }
 
@@ -2060,6 +2046,31 @@ bot.on('text', async (ctx, next) => {
         + `Tồn: ${created.stock_quantity}`,
       );
       await sendAdminProductsPanel(ctx);
+      return;
+    }
+
+    if (pending.type === 'add_one_account') {
+      const product = await loadProductAny(pending.productId);
+      if (!product) {
+        clearPendingAdminInput(ctx);
+        await ctx.reply('Không tìm thấy sản phẩm.');
+        return;
+      }
+
+      const line = String(text || '').trim();
+      if (!line) {
+        await ctx.reply('Dữ liệu tài khoản trống.');
+        return;
+      }
+      const result = await addProductAccountsBulk(pending.productId, line);
+      const synced = await syncProductStockFromAutoAccounts(pending.productId);
+      clearPendingAdminInput(ctx);
+      await ctx.reply(
+        `Đã thêm tài khoản cho "${product.name}".\n`
+        + `Thêm mới: ${result.added}\n`
+        + `Bỏ qua (trùng): ${result.skipped}\n`
+        + `Tồn hiện tại: ${synced.stock_quantity}`,
+      );
       return;
     }
 
@@ -2131,12 +2142,74 @@ bot.on('text', async (ctx, next) => {
       }
 
       const result = await addProductAccountsBulk(pending.productId, text);
+      const synced = await syncProductStockFromAutoAccounts(pending.productId);
       clearPendingAdminInput(ctx);
       await ctx.reply(
         `Đã xử lý ${result.total} dòng cho "${product.name}".\n`
         + `Thêm mới: ${result.added}\n`
-        + `Bỏ qua (trùng): ${result.skipped}`,
+        + `Bỏ qua (trùng): ${result.skipped}\n`
+        + `Tồn hiện tại: ${synced.stock_quantity}`,
       );
+      return;
+    }
+
+    if (pending.type === 'edit_account_data') {
+      const product = await loadProductAny(pending.productId);
+      if (!product) {
+        clearPendingAdminInput(ctx);
+        await ctx.reply('Không tìm thấy sản phẩm.');
+        return;
+      }
+
+      const parsed = parseAccountUpdatePayload(text);
+      if (!parsed) {
+        await ctx.reply('Sai cú pháp. Mẫu: account_id|du_lieu_moi');
+        return;
+      }
+
+      const updatedAcc = await updateProductAccountData(
+        pending.productId,
+        parsed.accountId,
+        parsed.accountData,
+      );
+
+      if (!updatedAcc) {
+        await ctx.reply('Không sửa được. Kiểm tra account_id hoặc tài khoản đã dùng.');
+        return;
+      }
+
+      const synced = await syncProductStockFromAutoAccounts(pending.productId);
+      clearPendingAdminInput(ctx);
+      await ctx.reply(
+        `Đã cập nhật tài khoản ${updatedAcc.id}.\n`
+        + `Tồn hiện tại: ${synced.stock_quantity}`,
+      );
+      return;
+    }
+
+    if (pending.type === 'delete_account') {
+      const product = await loadProductAny(pending.productId);
+      if (!product) {
+        clearPendingAdminInput(ctx);
+        await ctx.reply('Không tìm thấy sản phẩm.');
+        return;
+      }
+
+      const accountId = String(text || '').trim();
+      if (!accountId) {
+        await ctx.reply('Vui lòng nhập account_id.');
+        return;
+      }
+
+      const deleted = await deleteProductAccount(pending.productId, accountId);
+      if (!deleted) {
+        await ctx.reply('Không xóa được. Kiểm tra account_id hoặc tài khoản đã dùng.');
+        return;
+      }
+
+      const synced = await syncProductStockFromAutoAccounts(pending.productId);
+      clearPendingAdminInput(ctx);
+      await ctx.reply(`Đã xóa tài khoản ${accountId}.\nTồn hiện tại: ${synced.stock_quantity}`);
       return;
     }
   } catch (error) {
