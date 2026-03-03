@@ -11,7 +11,6 @@ const adminSecretKey = process.env.ADMIN_SECRET_KEY || '';
 const mmobankSecretKey = process.env.MMOBANK_SECRET_KEY || process.env.SEPAY_API_KEY || '';
 const mmobankAccountNo = process.env.MMOBANK_ACCOUNT_NO || process.env.SEPAY_ACCOUNT_NO || '';
 const mmobankBankCode = process.env.MMOBANK_BANK_CODE || process.env.SEPAY_BANK_CODE || '';
-const mmobankAccountName = process.env.MMOBANK_ACCOUNT_NAME || process.env.SEPAY_ACCOUNT_NAME || '';
 const mmobankWebhookPath = process.env.MMOBANK_WEBHOOK_PATH || process.env.SEPAY_WEBHOOK_PATH || '/mmobank/webhook';
 const webhookPort = Number(process.env.PORT || process.env.WEBHOOK_PORT || 3000);
 const adminTelegramIds = new Set(
@@ -1157,7 +1156,6 @@ function buildMmobankInstruction(order) {
   const qrUrl = buildVietQrUrl({
     bankCode: mmobankBankCode,
     accountNo: mmobankAccountNo,
-    accountName: mmobankAccountName,
     amount,
     transferContent,
   });
@@ -1166,7 +1164,6 @@ function buildMmobankInstruction(order) {
     'THANH TOAN QUA MMOBANK',
     `Ngan hang: ${mmobankBankCode || '(chua cau hinh)'}`,
     `So tai khoan: ${mmobankAccountNo || '(chua cau hinh)'}`,
-    `Chu TK: ${mmobankAccountName || '(khong bat buoc)'}`,
     `So tien: ${formatPriceVnd(amount)} ${order.currency || 'VND'}`,
     `Noi dung CK: ${transferContent}`,
   ];
