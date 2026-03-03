@@ -749,6 +749,13 @@ async function deliverAutoAccountsAfterPaid(order) {
     return { deliveredCount: 0, shortageCount };
   }
 
+  await db.from('order_history').insert({
+    order_id: order.id,
+    changed_by: null,
+    status: 'paid',
+    comment: `Auto accounts prepared (${deliveredCount} account(s))`,
+  });
+
   const { data: owner, error: ownerError } = await db
     .from('users')
     .select('telegram_id')
@@ -765,9 +772,39 @@ async function deliverAutoAccountsAfterPaid(order) {
     }
     try {
       await bot.telegram.sendMessage(Number(owner.telegram_id), text);
+      await db.from('order_history').insert({
+        order_id: order.id,
+        changed_by: null,
+        status: 'paid',
+        comment: `Auto accounts delivered to user (${deliveredCount} account(s))`,
+      });
     } catch (error) {
-      // no-op
+      const reason = String(error?.message || 'unknown_error').slice(0, 220);
+      await db.from('order_history').insert({
+        order_id: order.id,
+        changed_by: null,
+        status: 'paid',
+        comment: `Auto account delivery failed (${reason})`,
+      });
+      const adminIds = [...runtimeAdminIds].map((id) => Number(id)).filter(Number.isInteger);
+      for (const telegramId of adminIds) {
+        try {
+          await bot.telegram.sendMessage(
+            telegramId,
+            `Canh bao giao tai khoan tu dong that bai\nDon: #${order.id}\nUser: ${order.user_id}\nLy do: ${reason}`,
+          );
+        } catch (notifyError) {
+          // no-op
+        }
+      }
     }
+  } else {
+    await db.from('order_history').insert({
+      order_id: order.id,
+      changed_by: null,
+      status: 'paid',
+      comment: 'Auto account delivery skipped (missing user telegram_id)',
+    });
   }
 
   return { deliveredCount, shortageCount };
