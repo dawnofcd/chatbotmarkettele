@@ -17,6 +17,7 @@ Optional:
 - `MMOBANK_WEBHOOK_PATH` (default: `/mmobank/webhook`)
 - `MMOBANK_SECRET_KEY`
 - `MMOBANK_BANK_CODE`
+- `MMOBANK_ACCOUNT_NAME`
 
 ## Database setup
 1. Open your PostgreSQL SQL console/tool.
@@ -41,6 +42,7 @@ Optional:
    - `MMOBANK_WEBHOOK_PATH` (optional, default `/mmobank/webhook`)
    - `MMOBANK_SECRET_KEY` (optional)
    - `MMOBANK_BANK_CODE` (optional)
+   - `MMOBANK_ACCOUNT_NAME` (optional)
 4. Start command: `npm start` (already in `railway.json`).
 5. Redeploy and check logs for `Bot launched.`
 

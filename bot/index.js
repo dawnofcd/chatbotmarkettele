@@ -11,6 +11,7 @@ const adminSecretKey = process.env.ADMIN_SECRET_KEY || '';
 const mmobankSecretKey = process.env.MMOBANK_SECRET_KEY || process.env.SEPAY_API_KEY || '';
 const mmobankAccountNo = process.env.MMOBANK_ACCOUNT_NO || process.env.SEPAY_ACCOUNT_NO || '';
 const mmobankBankCode = process.env.MMOBANK_BANK_CODE || process.env.SEPAY_BANK_CODE || '';
+const mmobankAccountName = process.env.MMOBANK_ACCOUNT_NAME || process.env.SEPAY_ACCOUNT_NAME || '';
 const mmobankWebhookPath = process.env.MMOBANK_WEBHOOK_PATH || process.env.SEPAY_WEBHOOK_PATH || '/mmobank/webhook';
 const webhookPort = Number(process.env.PORT || process.env.WEBHOOK_PORT || 3000);
 const adminTelegramIds = new Set(
@@ -551,7 +552,7 @@ async function notifyAdminsNewOrder(orderId, total, currency) {
     return;
   }
 
-  const message = `Đơn mới #${orderId}\\nTổng tiền: ${total} ${currency}\\nPhương thức: MMOBank`;
+  const message = `Đơn mới #${orderId}\nTổng tiền: ${total} ${currency}\nPhương thức: MMOBank`;
   for (const telegramId of adminIds) {
     try {
       await bot.telegram.sendMessage(telegramId, message);
@@ -629,6 +630,111 @@ async function notifyOrderPaid(orderId, userId, amount, currency) {
   }
 }
 
+async function deliverAutoAccountsAfterPaid(order) {
+  if (!order?.id || !order?.user_id) {
+    return { deliveredCount: 0, shortageCount: 0 };
+  }
+
+  const { data: items, error: itemsError } = await db
+    .from('order_items')
+    .select('product_id,quantity')
+    .eq('order_id', order.id);
+  if (itemsError) {
+    throw itemsError;
+  }
+
+  const orderItems = items || [];
+  if (orderItems.length === 0) {
+    return { deliveredCount: 0, shortageCount: 0 };
+  }
+
+  const productIds = [...new Set(orderItems.map((item) => item.product_id).filter(Boolean))];
+  if (productIds.length === 0) {
+    return { deliveredCount: 0, shortageCount: 0 };
+  }
+
+  const { data: products, error: productsError } = await db
+    .from('products')
+    .select('id,name,delivery_type')
+    .in('id', productIds);
+  if (productsError) {
+    throw productsError;
+  }
+
+  const productMap = new Map((products || []).map((p) => [p.id, p]));
+  const lines = [];
+  let deliveredCount = 0;
+  let shortageCount = 0;
+
+  for (const item of orderItems) {
+    const product = productMap.get(item.product_id);
+    if (!product || product.delivery_type !== 'auto') {
+      continue;
+    }
+
+    const quantity = Math.max(1, Number(item.quantity || 1));
+    const { data: existingAccounts, error: existingError } = await db
+      .from('product_accounts')
+      .select('account_data,created_at')
+      .eq('product_id', item.product_id)
+      .eq('used_order_id', order.id)
+      .order('created_at', { ascending: true });
+    if (existingError) {
+      throw existingError;
+    }
+
+    const accounts = (existingAccounts || []).map((row) => row.account_data).filter(Boolean);
+    let missing = quantity - accounts.length;
+
+    while (missing > 0) {
+      const claimed = await claimAutoAccount(item.product_id, order.id);
+      if (!claimed?.account_data) {
+        break;
+      }
+      accounts.push(claimed.account_data);
+      missing -= 1;
+    }
+
+    if (accounts.length > 0) {
+      deliveredCount += accounts.length;
+      lines.push(
+        `San pham: ${product.name || item.product_id}\n${accounts.map((acc, idx) => `${idx + 1}. ${acc}`).join('\n')}`,
+      );
+    }
+
+    if (accounts.length < quantity) {
+      shortageCount += quantity - accounts.length;
+    }
+  }
+
+  if (lines.length === 0) {
+    return { deliveredCount: 0, shortageCount };
+  }
+
+  const { data: owner, error: ownerError } = await db
+    .from('users')
+    .select('telegram_id')
+    .eq('id', order.user_id)
+    .maybeSingle();
+  if (ownerError) {
+    throw ownerError;
+  }
+
+  if (owner?.telegram_id) {
+    let text = `Tai khoan don #${order.id} (dinh dang tk|mk|2fa):\n\n${lines.join('\n\n')}\n\nLuu y: Doi mat khau ngay sau khi nhan.`;
+    if (shortageCount > 0) {
+      text += '\nCon thieu mot so tai khoan auto. Vui long nhan admin de duoc cap bo sung.';
+    }
+    try {
+      await bot.telegram.sendMessage(Number(owner.telegram_id), text);
+    } catch (error) {
+      // no-op
+    }
+  }
+
+  return { deliveredCount, shortageCount };
+}
+
 async function markOrderPaidFromMmobank(order, event) {
   if (!order) {
     return { ok: false, reason: 'order_not_found' };
@@ -662,6 +768,7 @@ async function markOrderPaidFromMmobank(order, event) {
   });
 
   await notifyOrderPaid(updated.id, updated.user_id, updated.total_amount, updated.currency || 'VND');
+  await deliverAutoAccountsAfterPaid(updated);
   return { ok: true, alreadyPaid: false, order: updated };
 }
 
@@ -1156,14 +1263,16 @@ function buildMmobankInstruction(order) {
   const qrUrl = buildVietQrUrl({
     bankCode: mmobankBankCode,
     accountNo: mmobankAccountNo,
+    accountName: mmobankAccountName,
     amount,
     transferContent,
   });
 
   const lines = [
-    'THANH TOAN QUA MMOBANK',
+    'THONG TIN THANH TOAN',
     `Ngan hang: ${mmobankBankCode || '(chua cau hinh)'}`,
     `So tai khoan: ${mmobankAccountNo || '(chua cau hinh)'}`,
+    `Chu TK: ${mmobankAccountName || '(khong bat buoc)'}`,
     `So tien: ${formatPriceVnd(amount)} ${order.currency || 'VND'}`,
     `Noi dung CK: ${transferContent}`,
   ];
@@ -1342,27 +1451,7 @@ async function processPurchase(ctx, user, locale, product, quantity = 1) {
   }
 
   if (product.delivery_type === 'auto') {
-    const accounts = [];
-    for (let i = 0; i < qty; i += 1) {
-      const account = await claimAutoAccount(product.id, order.id);
-      if (!account?.account_data) {
-        break;
-      }
-      accounts.push(account.account_data);
-    }
-
-    if (accounts.length > 0) {
-      await ctx.reply(
-        `Tài khoản của bạn (${accounts.length}/${qty}) - định dạng tk|mk|2fa:\n${accounts.map((a, idx) => `${idx + 1}. ${a}`).join('\n')}\n\nLưu ý: Đổi mật khẩu ngay sau khi nhận.`,
-      );
-      if (accounts.length < qty) {
-        await ctx.reply('Còn thiếu một số tài khoản auto. Vui lòng nhắn admin để được cấp bổ sung.');
-      }
-    } else {
-      await ctx.reply(
-        'Tạm hết tài khoản auto. Vui lòng nhắn admin để được cấp bổ sung sau khi chuyển khoản thành công.',
-      );
-    }
+    await ctx.reply('Sau khi chuyen khoan thanh cong, bot se tu dong gui tai khoan cho ban.');
   } else {
     const manualNote = product.manual_contact_note
       || 'Loại không auto. Sau khi chuyển khoản thành công, vui lòng nhắn admin để nhận tài khoản.';
@@ -1755,7 +1844,7 @@ bot.action('menu_history', async (ctx) => {
   }
 
   const lines = orders.map((o) => `#${o.id} | ${STATUS_LABEL[o.status] || o.status} | ${o.total_amount} ${o.currency || 'VND'}`);
-  await ctx.reply(lines.join('\\n'));
+  await ctx.reply(lines.join('\n'));
 });
 
 bot.action('menu_support', async (ctx) => {
@@ -1770,7 +1859,7 @@ bot.action('menu_support', async (ctx) => {
   }
 
   const lines = channels.map((c) => `- ${c.name}: ${c.value}`);
-  await ctx.reply(lines.join('\\n'));
+  await ctx.reply(lines.join('\n'));
 });
 
 bot.action('menu_language', async (ctx) => {
@@ -1858,7 +1947,7 @@ bot.action('admin_orders_new', async (ctx) => {
   }
 
   for (const order of orders) {
-    const info = `#${order.id} | user:${order.user_id}\\n${order.total_amount} ${order.currency || 'VND'} | ${order.status}`;
+    const info = `#${order.id} | user:${order.user_id}\n${order.total_amount} ${order.currency || 'VND'} | ${order.status}`;
     await ctx.reply(info, orderActionKeyboard(order.id, order.status));
   }
 });
@@ -1892,6 +1981,10 @@ bot.action(/^ordst:(.+):(draft|confirmed|paid|cancelled)$/, async (ctx) => {
     status,
     comment: 'Updated from admin panel',
   });
+
+  if (status === 'paid') {
+    await deliverAutoAccountsAfterPaid(updated);
+  }
 
   const { data: owner } = await db
     .from('users')
@@ -2291,10 +2384,10 @@ bot.action('admin_reports', async (ctx) => {
   const report = await loadReport();
 
   await ctx.reply(
-    `${t(locale, 'reportTitle')}\\n`
-    + `- Total orders: ${report.totalOrders}\\n`
-    + `- Confirmed: ${report.confirmedOrders}\\n`
-    + `- Paid: ${report.paidOrders}\\n`
+    `${t(locale, 'reportTitle')}\n`
+    + `- Total orders: ${report.totalOrders}\n`
+    + `- Confirmed: ${report.confirmedOrders}\n`
+    + `- Paid: ${report.paidOrders}\n`
     + `- Revenue: ${report.revenue} VND`,
   );
 });
