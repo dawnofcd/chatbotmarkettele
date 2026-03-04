@@ -1388,6 +1388,64 @@ async function loadAdminProducts() {
   return data || [];
 }
 
+async function loadAdminProductAccountsSummary(productId, previewLimit = 20) {
+  const [availableResp, usedResp, previewResp] = await Promise.all([
+    db.from('product_accounts').select('id', { count: 'exact', head: true }).eq('product_id', productId).eq('is_used', false),
+    db.from('product_accounts').select('id', { count: 'exact', head: true }).eq('product_id', productId).eq('is_used', true),
+    db
+      .from('product_accounts')
+      .select('account_data,is_used,used_order_id,created_at,used_at')
+      .eq('product_id', productId)
+      .order('created_at', { ascending: true })
+      .limit(previewLimit),
+  ]);
+
+  if (availableResp.error) throw availableResp.error;
+  if (usedResp.error) throw usedResp.error;
+  if (previewResp.error) throw previewResp.error;
+
+  return {
+    available: availableResp.count || 0,
+    used: usedResp.count || 0,
+    preview: previewResp.data || [],
+  };
+}
+
+function buildAdminProductAccountsText(product, summary) {
+  const lines = [
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '📚 KHO TÀI KHOẢN AUTO',
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '',
+    `Sản phẩm: ${product.name}`,
+    `✅ Còn sẵn: ${summary.available}`,
+    `🗂 Đã dùng: ${summary.used}`,
+    `📦 Tồn trên products: ${product.stock_quantity ?? 0}`,
+    '',
+    `Preview ${summary.preview.length} dòng đầu:`,
+    '',
+  ];
+
+  if (!summary.preview.length) {
+    lines.push('(Chưa có tài khoản trong kho)');
+    return lines.join('\n');
+  }
+
+  for (let i = 0; i < summary.preview.length; i += 1) {
+    const row = summary.preview[i];
+    const parsed = parseAccountData(row.account_data);
+    const status = row.is_used ? '🔴 used' : '🟢 available';
+    const orderPart = row.used_order_id ? ` | order:${String(row.used_order_id).slice(0, 8)}` : '';
+    lines.push(`${i + 1}. ${status}${orderPart}`);
+    lines.push(`   TK: ${parsed.account}`);
+    lines.push(`   MK: ${parsed.password}`);
+    lines.push(`   2FA: ${parsed.twofa}`);
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
+
 async function updateAdminProduct(productId, patch) {
   const { data, error } = await db
     .from('products')
@@ -2022,6 +2080,7 @@ function adminProductDetailKeyboard(product) {
       Markup.button.callback('💲 Sửa giá', `admsetprice:${product.id}`),
       Markup.button.callback('📦 Sửa tồn', `admsetstock:${product.id}`),
     ],
+    [Markup.button.callback('📚 Xem kho TK AUTO', `admaccounts:${product.id}`)],
     [Markup.button.callback('🗑 Xóa sản phẩm', `admdelete:${product.id}`)],
     [Markup.button.callback('↩ Danh sách', 'admin_products_v2')],
   ]);
@@ -2831,6 +2890,35 @@ bot.action(/^admsetstock:(.+)$/, async (ctx) => {
   await ctx.reply(
     `Nhập tồn mới cho "${product.name}" (số nguyên >= 0). Ví dụ: 50\n`
     + 'Nhập /cancel để hủy.',
+  );
+});
+
+bot.action(/^admaccounts:(.+)$/, async (ctx) => {
+  const user = await ensureUser(ctx);
+  const locale = getLocale(user);
+  if (!isAdmin(ctx, user)) {
+    await ctx.answerCbQuery(t(locale, 'noAdmin'), { show_alert: true });
+    return;
+  }
+
+  const productId = ctx.match[1];
+  const product = await loadProductAny(productId);
+  if (!product) {
+    await ctx.answerCbQuery('Not found');
+    return;
+  }
+
+  const summary = await loadAdminProductAccountsSummary(productId, 20);
+  await ctx.answerCbQuery();
+  await replaceOrReply(
+    ctx,
+    buildAdminProductAccountsText(product, summary),
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback('🔄 Làm mới', `admaccounts:${productId}`),
+        Markup.button.callback('↩ Chi tiết SP', `admprd:${productId}`),
+      ],
+    ]),
   );
 });
 
