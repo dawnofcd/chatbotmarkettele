@@ -187,24 +187,24 @@ function t(locale, key, params = {}) {
 
 function mainMenu(locale, hasAdminAccess = false) {
   const iconCart = '\uD83D\uDED2';
-  const iconHistory = '\uD83D\uDCDC';
+  const iconHistory = '\uD83D\uDCCB';
   const iconSupport = '\uD83D\uDCAC';
   const iconLang = '\uD83C\uDF10';
 
   if (locale === 'en') {
     const rows = [
       [
-        Markup.button.callback(`${iconCart} Catalogue`, 'menu_catalogue'),
-        Markup.button.callback(`${iconHistory} History`, 'menu_history'),
+        Markup.button.callback(`${iconCart} Shop`, 'menu_catalogue'),
+        Markup.button.callback(`${iconHistory} Orders`, 'menu_history'),
       ],
       [
         Markup.button.callback(`${iconSupport} Support`, 'menu_support'),
-        Markup.button.callback(`${iconLang} Language`, 'menu_language'),
+        Markup.button.callback(`${iconLang} Lang`, 'menu_language'),
       ],
     ];
 
     if (hasAdminAccess) {
-      rows.push([Markup.button.callback('Admin', 'menu_admin')]);
+      rows.push([Markup.button.callback('🛠 Admin', 'menu_admin')]);
     }
 
     return Markup.inlineKeyboard(rows);
@@ -212,24 +212,24 @@ function mainMenu(locale, hasAdminAccess = false) {
 
   const rows = [
     [
-      Markup.button.callback(`${iconCart} Danh \u006d\u1ee5c`, 'menu_catalogue'),
-      Markup.button.callback(`${iconHistory} L\u1ecbch s\u1eed`, 'menu_history'),
+      Markup.button.callback(`${iconCart} Mua hàng`, 'menu_catalogue'),
+      Markup.button.callback(`${iconHistory} Đơn của tôi`, 'menu_history'),
     ],
     [
       Markup.button.callback(`${iconSupport} H\u1ed7 tr\u1ee3`, 'menu_support'),
-      Markup.button.callback(`${iconLang} Ng\u00f4n ng\u1eef`, 'menu_language'),
+      Markup.button.callback(`${iconLang} Ngôn ngữ`, 'menu_language'),
     ],
   ];
 
   if (hasAdminAccess) {
-    rows.push([Markup.button.callback('Admin', 'menu_admin')]);
+    rows.push([Markup.button.callback('🛠 Admin', 'menu_admin')]);
   }
 
   return Markup.inlineKeyboard(rows);
 }
 
 function buildHomeMessage(locale, firstName) {
-  const iconAnnounce = '\uD83D\uDCE2';
+  const iconAnnounce = '\uD83C\uDF89';
   const envAnnouncement = locale === 'en'
     ? process.env.HOME_ANNOUNCEMENT_EN
     : process.env.HOME_ANNOUNCEMENT_VI;
@@ -240,22 +240,28 @@ function buildHomeMessage(locale, firstName) {
 
   if (locale === 'en') {
     return [
-      `${iconAnnounce} ADMIN ANNOUNCEMENT`,
+      '━━━━━━━━━━━━━━━━━━━━━━',
+      `${iconAnnounce} WELCOME TO THE SHOP`,
+      '━━━━━━━━━━━━━━━━━━━━━━',
       '',
-      `Hello ${firstName || 'there'}!`,
-      '- Check the latest account deals in Catalogue.',
-      '- Need help? Tap Support for fast contact.',
-      '- Use Language to switch between Vietnamese/English.',
+      `Hi ${firstName || 'there'},`,
+      'Pick one option below to continue:',
+      '• Browse products',
+      '• Track your orders',
+      '• Contact support quickly',
     ].join('\n');
   }
 
   return [
-    `${iconAnnounce} TH\u00d4NG B\u00c1O T\u1eea ADMIN`,
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    `${iconAnnounce} CHÀO MỪNG BẠN`,
+    '━━━━━━━━━━━━━━━━━━━━━━',
     '',
-    `Xin ch\u00e0o ${firstName || 'b\u1ea1n'}!`,
-    '- C\u00f3 deal t\u00e0i kho\u1ea3n m\u1edbi trong Danh m\u1ee5c.',
-    '- C\u1ea7n h\u1ed7 tr\u1ee3 nhanh? B\u1ea5m H\u1ed7 tr\u1ee3 \u0111\u1ec3 li\u00ean h\u1ec7.',
-    '- C\u00f3 th\u1ec3 \u0111\u1ed5i ng\u00f4n ng\u1eef t\u1ea1i m\u1ee5c Ng\u00f4n ng\u1eef.',
+    `Xin chào ${firstName || 'bạn'},`,
+    'Chọn thao tác bên dưới để bắt đầu:',
+    '• Xem sản phẩm đang bán',
+    '• Theo dõi đơn đã tạo',
+    '• Liên hệ hỗ trợ nhanh',
   ].join('\n');
 }
 
@@ -263,13 +269,19 @@ async function sendHomePanel(ctx, userRecord, locale) {
   const firstName = ctx.from.first_name || (locale === 'en' ? 'there' : 'b\u1ea1n');
   await ctx.reply(buildHomeMessage(locale, firstName), mainMenu(locale, isAdmin(ctx, userRecord)));
 }
-const adminMenu = Markup.inlineKeyboard([
-  [
-    Markup.button.callback('Đơn mới', 'admin_orders_new'),
-    Markup.button.callback('Sản phẩm', 'admin_products_v2'),
-  ],
-  [Markup.button.callback('Thống kê', 'admin_reports')],
-]);
+function buildAdminMainKeyboard() {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback('📦 Đơn chờ xử lý', 'admin_orders_new'),
+      Markup.button.callback('🛍 Sản phẩm', 'admin_products_v2'),
+    ],
+    [
+      Markup.button.callback('📊 Thống kê', 'admin_reports'),
+      Markup.button.callback('🔄 Làm mới', 'admin_home_refresh'),
+    ],
+    [Markup.button.callback('🗑 Đóng', 'admin_home_close')],
+  ]);
+}
 
 async function ensureUser(ctx) {
   const telegramId = String(ctx.from.id);
@@ -664,6 +676,97 @@ async function notifyAdminsNewOrder(orderId, total, currency) {
   }
 }
 
+async function restoreStockFromOrderItems(orderId) {
+  const { data: items, error: itemsError } = await db
+    .from('order_items')
+    .select('product_id,quantity')
+    .eq('order_id', orderId);
+  if (itemsError) {
+    throw itemsError;
+  }
+
+  const grouped = new Map();
+  for (const item of items || []) {
+    const productId = item.product_id;
+    const quantity = Number(item.quantity || 0);
+    if (!productId || !Number.isFinite(quantity) || quantity <= 0) {
+      continue;
+    }
+    grouped.set(productId, (grouped.get(productId) || 0) + quantity);
+  }
+
+  for (const [productId, quantity] of grouped.entries()) {
+    const { data: product, error: productError } = await db
+      .from('products')
+      .select('id,stock_quantity')
+      .eq('id', productId)
+      .maybeSingle();
+    if (productError) {
+      throw productError;
+    }
+    if (!product) {
+      continue;
+    }
+
+    const currentStock = Number(product.stock_quantity || 0);
+    const nextStock = Math.max(currentStock + quantity, 0);
+    const { error: updateError } = await db
+      .from('products')
+      .update({ stock_quantity: nextStock })
+      .eq('id', productId);
+    if (updateError) {
+      throw updateError;
+    }
+  }
+}
+
+async function cancelOrderByUser(orderId, userId) {
+  const { data: order, error: orderError } = await db
+    .from('orders')
+    .select('id,user_id,status,total_amount,currency')
+    .eq('id', orderId)
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (orderError) {
+    throw orderError;
+  }
+  if (!order) {
+    return { ok: false, reason: 'not_found' };
+  }
+  if (order.status === 'paid') {
+    return { ok: false, reason: 'paid', order };
+  }
+  if (order.status === 'cancelled') {
+    return { ok: true, alreadyCancelled: true, order };
+  }
+
+  const { data: updatedOrder, error: updateError } = await db
+    .from('orders')
+    .update({ status: 'cancelled' })
+    .eq('id', orderId)
+    .eq('user_id', userId)
+    .in('status', ['draft', 'confirmed'])
+    .select('id,user_id,status,total_amount,currency')
+    .maybeSingle();
+  if (updateError) {
+    throw updateError;
+  }
+  if (!updatedOrder) {
+    return { ok: false, reason: 'status_changed' };
+  }
+
+  await restoreStockFromOrderItems(orderId);
+  await db.from('order_history').insert({
+    order_id: updatedOrder.id,
+    changed_by: userId,
+    status: 'cancelled',
+    comment: 'Cancelled by user from Telegram payment panel',
+  });
+  orderPaymentMessageRefs.delete(String(orderId));
+
+  return { ok: true, alreadyCancelled: false, order: updatedOrder };
+}
+
 function sendJson(res, statusCode, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -689,7 +792,9 @@ async function findOrderByTransferCode(transferCode) {
 
   const rows = data || [];
   for (const row of rows) {
-    if (buildMmobankTransferCode(row.id).toUpperCase() === normalizedCode) {
+    const currentCode = buildMmobankTransferCode(row.id).toUpperCase();
+    const legacyCode = `DH${String(row.id || '').replace(/-/g, '').slice(0, 10).toUpperCase()}`;
+    if (currentCode === normalizedCode || legacyCode === normalizedCode) {
       return row;
     }
   }
@@ -1101,8 +1206,7 @@ function buildOrderHistoryPanel(orders, locale) {
   lines.push(locale === 'en' ? '\uD83D\uDCCA ORDER HISTORY' : '\uD83D\uDCCA LICH SU DON HANG');
   lines.push('━━━━━━━━━━━━━━━━━━━━━━');
   lines.push('');
-  lines.push(locale === 'en' ? '\uD83D\uDFE2 = Paid' : '\uD83D\uDFE2 = Da thanh toan');
-  lines.push(locale === 'en' ? '\uD83D\uDD35 = Confirmed' : '\uD83D\uDD35 = Da xac nhan');
+  lines.push(locale === 'en' ? '\uD83D\uDFE2 Paid | \uD83D\uDD35 Waiting | \uD83D\uDD34 Cancelled' : '\uD83D\uDFE2 Đã thanh toán | \uD83D\uDD35 Chờ xử lý | \uD83D\uDD34 Đã hủy');
   lines.push('');
   lines.push('──────────────────────');
   lines.push('');
@@ -1113,7 +1217,7 @@ function buildOrderHistoryPanel(orders, locale) {
     totalAmount += Number.isFinite(amount) ? amount : 0;
     const status = normalizeStatus(order.status);
     const icon = statusIcon(status);
-    const idText = String(order.id || '').toUpperCase();
+    const idText = String(order.id || '').slice(0, 8).toUpperCase();
     const currency = order.currency || 'VND';
     lines.push(`${icon} #${idText}`);
     lines.push(`\uD83D\uDCB0 ${formatPriceVnd(amount)} ${currency}`);
@@ -1121,9 +1225,26 @@ function buildOrderHistoryPanel(orders, locale) {
   }
 
   lines.push('──────────────────────');
-  lines.push(`${locale === 'en' ? '\uD83D\uDCCC Total orders' : '\uD83D\uDCCC Tong don'}: ${rows.length}`);
-  lines.push(`${locale === 'en' ? '\uD83D\uDCB5 Total amount' : '\uD83D\uDCB5 Tong tien'}: ${formatPriceVnd(totalAmount)} VND`);
+  lines.push(`${locale === 'en' ? '\uD83D\uDCCC Total orders' : '\uD83D\uDCCC Tổng đơn'}: ${rows.length}`);
+  lines.push(`${locale === 'en' ? '\uD83D\uDCB5 Total amount' : '\uD83D\uDCB5 Tổng tiền'}: ${formatPriceVnd(totalAmount)} VND`);
   lines.push('━━━━━━━━━━━━━━━━━━━━━━');
+  return lines.join('\n');
+}
+
+function buildSupportPanel(channels, locale) {
+  const lines = [
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    locale === 'en' ? '💬 SUPPORT CHANNELS' : '💬 KÊNH HỖ TRỢ',
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '',
+  ];
+
+  for (const channel of channels) {
+    lines.push(`• ${channel.name}: ${channel.value}`);
+  }
+
+  lines.push('');
+  lines.push(locale === 'en' ? 'Please provide order ID when contacting support.' : 'Vui lòng gửi kèm mã đơn khi cần hỗ trợ.');
   return lines.join('\n');
 }
 
@@ -1157,20 +1278,90 @@ async function loadAdminOrders() {
   return data || [];
 }
 
+async function loadAdminOrderById(orderId) {
+  const { data, error } = await db
+    .from('orders')
+    .select('id,user_id,status,total_amount,currency,created_at')
+    .eq('id', orderId)
+    .maybeSingle();
+
+  if (error) {
+    throw error;
+  }
+
+  return data;
+}
+
+function buildAdminOrdersText(orders) {
+  if (!orders.length) {
+    return '📦 Không có đơn chờ xử lý.';
+  }
+
+  const lines = [
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '📦 ĐƠN CHỜ XỬ LÝ',
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '',
+  ];
+
+  for (const order of orders) {
+    lines.push(
+      `#${order.id.slice(0, 8)} | user:${order.user_id} | ${formatPriceVnd(order.total_amount)} ${order.currency || 'VND'} | ${order.status}`,
+    );
+  }
+
+  lines.push('');
+  lines.push('Bấm vào đơn tương ứng để xử lý trạng thái.');
+  return lines.join('\n');
+}
+
+function buildAdminOrdersKeyboard(orders) {
+  const rows = [];
+  for (const order of orders) {
+    rows.push([
+      Markup.button.callback(
+        `#${String(order.id || '').slice(0, 8)} • ${formatPriceVnd(order.total_amount)} ${(order.currency || 'VND')}`,
+        `admord:${order.id}`,
+      ),
+    ]);
+  }
+  rows.push([
+    Markup.button.callback('🔄 Làm mới', 'admin_orders_new'),
+    Markup.button.callback('🏠 Admin', 'menu_admin'),
+  ]);
+  return Markup.inlineKeyboard(rows);
+}
+
+function adminOrderDetailText(order) {
+  return [
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '🧾 CHI TIẾT ĐƠN',
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '',
+    `🆔 Mã đơn: #${order.id}`,
+    `👤 User ID: ${order.user_id}`,
+    `📌 Trạng thái: ${order.status}`,
+    `💰 Tổng tiền: ${formatPriceVnd(order.total_amount)} ${order.currency || 'VND'}`,
+  ].join('\n');
+}
+
 function orderActionKeyboard(orderId, currentStatus) {
   const buttons = [];
 
   if (currentStatus !== 'confirmed') {
-    buttons.push(Markup.button.callback('Confirm', `ordst:${orderId}:confirmed`));
+    buttons.push(Markup.button.callback('✅ Xác nhận', `ordst:${orderId}:confirmed`));
   }
   if (currentStatus !== 'paid') {
-    buttons.push(Markup.button.callback('Paid', `ordst:${orderId}:paid`));
+    buttons.push(Markup.button.callback('💸 Đã thanh toán', `ordst:${orderId}:paid`));
   }
   if (currentStatus !== 'cancelled') {
-    buttons.push(Markup.button.callback('Cancel', `ordst:${orderId}:cancelled`));
+    buttons.push(Markup.button.callback('❌ Hủy', `ordst:${orderId}:cancelled`));
   }
 
-  return Markup.inlineKeyboard([buttons.slice(0, 3)]);
+  return Markup.inlineKeyboard([
+    buttons.slice(0, 3),
+    [Markup.button.callback('↩ Danh sách đơn', 'admin_orders_new')],
+  ]);
 }
 
 async function loadAdminProducts() {
@@ -1241,6 +1432,51 @@ async function loadReport() {
   };
 }
 
+async function loadAdminSnapshot() {
+  const [openOrdersResp, activeProductsResp, lowStockResp] = await Promise.all([
+    db.from('orders').select('id', { count: 'exact', head: true }).in('status', ['draft', 'confirmed']),
+    db.from('products').select('id', { count: 'exact', head: true }).eq('is_active', true),
+    db.from('products').select('id', { count: 'exact', head: true }).lte('stock_quantity', 3).eq('is_active', true),
+  ]);
+
+  if (openOrdersResp.error) throw openOrdersResp.error;
+  if (activeProductsResp.error) throw activeProductsResp.error;
+  if (lowStockResp.error) throw lowStockResp.error;
+
+  return {
+    openOrders: openOrdersResp.count || 0,
+    activeProducts: activeProductsResp.count || 0,
+    lowStockProducts: lowStockResp.count || 0,
+  };
+}
+
+function buildAdminMainText(snapshot) {
+  return [
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '🛠 ADMIN DASHBOARD',
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '',
+    `📦 Đơn chờ xử lý: ${snapshot.openOrders}`,
+    `🛍 Sản phẩm đang bán: ${snapshot.activeProducts}`,
+    `⚠️ Sản phẩm sắp hết (<=3): ${snapshot.lowStockProducts}`,
+    '',
+    'Chọn tác vụ bên dưới để quản lý nhanh.',
+  ].join('\n');
+}
+
+async function sendAdminMainPanel(ctx, shouldEdit = false) {
+  const snapshot = await loadAdminSnapshot();
+  const text = buildAdminMainText(snapshot);
+  const keyboard = buildAdminMainKeyboard();
+
+  if (shouldEdit) {
+    await replaceOrReply(ctx, text, keyboard);
+    return;
+  }
+
+  await safeReply(ctx, text, keyboard);
+}
+
 async function safeReply(ctx, text, extra) {
   try {
     await ctx.reply(text, extra);
@@ -1295,14 +1531,18 @@ function formatPriceVnd(value) {
 }
 
 function buildMmobankTransferCode(orderId) {
-  const compact = String(orderId || '').replace(/-/g, '').slice(0, 10).toUpperCase();
-  return `DH${compact}`;
+  const compact = String(orderId || '').trim().split('-')[0].replace(/[^a-zA-Z0-9]/g, '');
+  return compact.slice(0, 8).toUpperCase();
 }
 
 function extractTransferCodeFromText(text) {
   const normalized = String(text || '').toUpperCase();
-  const match = normalized.match(/DH[A-Z0-9]{4,20}/);
-  return match ? match[0] : null;
+  const oldStyle = normalized.match(/DH[A-Z0-9]{4,20}/);
+  if (oldStyle) {
+    return oldStyle[0];
+  }
+  const shortStyle = normalized.match(/\b[A-F0-9]{8}\b/);
+  return shortStyle ? shortStyle[0] : null;
 }
 
 function toObject(value) {
@@ -1479,31 +1719,63 @@ function buildMmobankInstruction(order) {
   });
 
   const lines = [
-    'THONG TIN THANH TOAN',
-    `Ngan hang: ${mmobankBankCode || '(chua cau hinh)'}`,
-    `So tai khoan: ${mmobankAccountNo || '(chua cau hinh)'}`,
-    `Chu TK: ${mmobankAccountName || '(khong bat buoc)'}`,
-    `So tien: ${formatPriceVnd(amount)} ${order.currency || 'VND'}`,
-    `Noi dung CK: ${transferContent}`,
+    '━━━━━━━━━━━━━━━━━━',
+    '🏦 THÔNG TIN THANH TOÁN',
+    '━━━━━━━━━━━━━━━━━━',
+    `Ngân hàng: ${mmobankBankCode || '(chưa cấu hình)'}`,
+    `Số tài khoản: ${mmobankAccountNo || '(chưa cấu hình)'}`,
+    `Chủ TK: ${mmobankAccountName || '(không bắt buộc)'}`,
+    `Số tiền: ${formatPriceVnd(amount)} ${order.currency || 'VND'}`,
+    `Nội dung CK: ${transferContent.toLowerCase()}`,
+    '━━━━━━━━━━━━━━━━━━',
   ];
 
   if (!mmobankAccountNo) {
-    lines.push('Luu y: Chua cau hinh MMOBANK_ACCOUNT_NO trong .env.');
+    lines.push('Lưu ý: Chưa cấu hình MMOBANK_ACCOUNT_NO trong .env.');
   } else if (!mmobankBankCode) {
-    lines.push('Luu y: Chua cau hinh MMOBANK_BANK_CODE nen khong tao duoc QR.');
+    lines.push('Lưu ý: Chưa cấu hình MMOBANK_BANK_CODE nên không tạo được QR.');
   }
 
   return { text: lines.join('\n'), qrUrl, transferContent };
 }
 
+function buildOrderCreatedMessage(order, quantity, unitPrice) {
+  const transferContent = String(order?.id || '').trim().split('-')[0] || buildMmobankTransferCode(order?.id);
+  const currency = order?.currency || 'VND';
+  const total = Number(order?.total_amount || 0);
+  const qty = Number(quantity || 0);
+  const unit = Number(unitPrice || 0);
+
+  return [
+    '━━━━━━━━━━━━━━━━━━',
+    '✅ ĐƠN HÀNG ĐÃ ĐƯỢC TẠO',
+    '━━━━━━━━━━━━━━━━━━',
+    '',
+    '🆔 Order ID:',
+    `#${order.id}`,
+    '',
+    `📦 Số lượng: ${qty}`,
+    `💵 Giá: ${formatPriceVnd(unit)} ${currency}`,
+    `💰 Tổng tiền: ${formatPriceVnd(total)} ${currency}`,
+    '',
+    '💳 Vui lòng chuyển khoản đúng nội dung:',
+    transferContent.toLowerCase(),
+    '',
+    '🤖 Sau khi hệ thống xác nhận thanh toán,',
+    'tài khoản sẽ được gửi tự động trong vài giây.',
+    '',
+    '━━━━━━━━━━━━━━━━━━',
+    'Cảm ơn bạn đã tin tưởng!',
+  ].join('\n');
+}
+
 function compactProductButtonLabel(product) {
-  const box = '\uD83D\uDCE6';
-  const maxNameLength = 36;
+  const maxNameLength = 24;
   const rawName = String(product.name || '').trim();
   const shortName = rawName.length > maxNameLength ? `${rawName.slice(0, maxNameLength - 1)}...` : rawName;
-  const priceText = `${formatPriceVnd(product.price)} ${product.currency || 'VND'}`;
-  const stockText = Number.isFinite(Number(product.stock_quantity)) ? Number(product.stock_quantity) : '-';
-  return `${shortName} | ${priceText} | ${box} ${stockText}`;
+  const priceText = `${formatPriceVnd(product.price)}${product.currency === 'VND' ? 'đ' : ` ${product.currency || 'VND'}`}`;
+  const stockText = Number.isFinite(Number(product.stock_quantity)) ? Number(product.stock_quantity) : 0;
+  return `${shortName} • ${priceText} • kho:${stockText}`;
 }
 
 function formatDong(value) {
@@ -1522,28 +1794,34 @@ function buildProductDetailPanel(locale, product) {
 
   if (locale === 'en') {
     return [
+      '━━━━━━━━━━━━━━━━━━━━━━',
+      '🧩 PRODUCT DETAIL',
+      '━━━━━━━━━━━━━━━━━━━━━━',
       `${box} ${product.name}`,
       `${money} Price: ${formatDong(product.price)}`,
       `${box} Stock: ${stockText}`,
       '',
-      'Choose payment method:',
+      'Choose quantity and continue payment.',
     ].join('\n');
   }
 
   return [
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '🧩 CHI TIẾT SẢN PHẨM',
+    '━━━━━━━━━━━━━━━━━━━━━━',
     `${box} ${product.name}`,
     `${money} Gi\u00e1: ${formatDong(product.price)}`,
     `${box} C\u00f2n: ${stockText}`,
     '',
-    'Ch\u1ecdn ph\u01b0\u01a1ng th\u1ee9c thanh to\u00e1n:',
+    'Chọn số lượng rồi tiếp tục thanh toán.',
   ].join('\n');
 }
 
 function buildCataloguePrompt(locale) {
-  const point = '\uD83D\uDC49';
+  const point = '\uD83D\uDED2';
   return locale === 'en'
-    ? `${point} CHOOSE A PRODUCT BELOW:`
-    : `${point} CH\u1eccN S\u1ea2N PH\u1ea8M B\u00caN D\u01af\u1edaI:`;
+    ? `${point} Choose a product:`
+    : `${point} Chọn sản phẩm muốn mua:`;
 }
 
 function buildCatalogueKeyboard(products, locale) {
@@ -1551,8 +1829,8 @@ function buildCatalogueKeyboard(products, locale) {
   const trash = '\uD83D\uDDD1';
   const rows = products.map((p) => [Markup.button.callback(compactProductButtonLabel(p), `prd:${p.id}`)]);
   rows.push([
-    Markup.button.callback(`${refresh} C\u1eadp nh\u1eadt`, 'catalogue_refresh'),
-    Markup.button.callback(`${trash} X\u00f3a`, 'catalogue_close'),
+    Markup.button.callback(`${refresh} Làm mới`, 'catalogue_refresh'),
+    Markup.button.callback(`${trash} Đóng`, 'catalogue_close'),
   ]);
   return Markup.inlineKeyboard(rows);
 }
@@ -1602,19 +1880,7 @@ async function processPurchase(ctx, user, locale, product, quantity = 1) {
 
   const order = await createSingleItemOrder(user.id, product, qty);
   const unitPrice = calcUnitPriceByQuantity(product.price, qty);
-  const message = t(locale, 'orderCreated', {
-    id: order.id,
-    total: order.total_amount,
-    currency: order.currency || 'VND',
-  });
-
-  const deliveryNote = product.delivery_type === 'auto'
-    ? 'Sau khi chuyen khoan thanh cong, bot se tu dong gui tai khoan cho ban.'
-    : (product.manual_contact_note
-      || 'Loại không auto. Sau khi chuyển khoản thành công, vui lòng nhắn admin để nhận tài khoản.');
-  await ctx.reply(
-    `${message}\nSố lượng: ${qty}\nĐơn giá: ${unitPrice} ${order.currency || 'VND'}\n${deliveryNote}`,
-  );
+  await ctx.reply(buildOrderCreatedMessage(order, qty, unitPrice));
 
   const mmobank = buildMmobankInstruction(order);
   let paymentMessage = null;
@@ -1624,6 +1890,7 @@ async function processPurchase(ctx, user, locale, product, quantity = 1) {
         caption: mmobank.text,
         ...Markup.inlineKeyboard([
           [Markup.button.callback('Tôi đã chuyển khoản', `paydone:${order.id}`)],
+          [Markup.button.callback('Hủy đơn', `paycancel:${order.id}`)],
         ]),
       });
     } catch (error) {
@@ -1631,6 +1898,7 @@ async function processPurchase(ctx, user, locale, product, quantity = 1) {
         mmobank.text,
         Markup.inlineKeyboard([
           [Markup.button.callback('Tôi đã chuyển khoản', `paydone:${order.id}`)],
+          [Markup.button.callback('Hủy đơn', `paycancel:${order.id}`)],
         ]),
       );
     }
@@ -1639,6 +1907,7 @@ async function processPurchase(ctx, user, locale, product, quantity = 1) {
       mmobank.text,
       Markup.inlineKeyboard([
         [Markup.button.callback('Tôi đã chuyển khoản', `paydone:${order.id}`)],
+        [Markup.button.callback('Hủy đơn', `paycancel:${order.id}`)],
       ]),
     );
   }
@@ -1652,16 +1921,18 @@ async function processPurchase(ctx, user, locale, product, quantity = 1) {
 
 function adminProductsListText(products) {
   const lines = products.map((p) => {
-    const status = p.is_active ? 'đang bán' : 'tạm ẩn';
-    return `- ${p.name} | ${p.price} ${p.currency || 'VND'} | tồn:${p.stock_quantity ?? '-'} | ${status}`;
+    const status = p.is_active ? '🟢 bán' : '⚪ ẩn';
+    return `• ${String(p.name || '').slice(0, 30)} | ${formatPriceVnd(p.price)} ${p.currency || 'VND'} | kho:${p.stock_quantity ?? '-'} | ${status}`;
   });
 
   return [
-    'QUAN LY SAN PHAM',
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '🛍 QUẢN LÝ SẢN PHẨM',
+    '━━━━━━━━━━━━━━━━━━━━━━',
     '',
     ...lines,
     '',
-    'Chọn sản phẩm để sửa / xóa / thêm tài khoản auto.',
+    'Chọn sản phẩm để sửa nhanh.',
   ].join('\n');
 }
 
@@ -1673,41 +1944,47 @@ function buildAdminProductsKeyboard(products) {
   });
 
   rows.push([
-    Markup.button.callback('Thêm mới', 'admin_add_product_start'),
-    Markup.button.callback('Làm mới', 'admin_products_refresh'),
+    Markup.button.callback('➕ Thêm mới', 'admin_add_product_start'),
+    Markup.button.callback('🔄 Làm mới', 'admin_products_refresh'),
   ]);
-  rows.push([Markup.button.callback('Đóng', 'admin_products_close')]);
+  rows.push([
+    Markup.button.callback('🏠 Admin', 'menu_admin'),
+    Markup.button.callback('🗑 Đóng', 'admin_products_close'),
+  ]);
 
   return Markup.inlineKeyboard(rows);
 }
 
 function adminProductDetailText(product) {
   return [
-    `SAN PHAM: ${product.name}`,
-    `Giá: ${product.price} ${product.currency || 'VND'}`,
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '🧩 CHI TIẾT SẢN PHẨM',
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '',
+    `Tên: ${product.name}`,
+    `Giá: ${formatPriceVnd(product.price)} ${product.currency || 'VND'}`,
     `Tồn kho: ${product.stock_quantity ?? '-'}`,
     `Trạng thái: ${product.is_active ? 'đang bán' : 'tạm ẩn'}`,
     `Kiểu giao: ${product.delivery_type === 'auto' ? 'auto' : 'thủ công'}`,
     '',
-    'CRUD: Sửa giá, sửa tồn, bật/tắt, xóa sản phẩm.',
-    'Kho AUTO: thêm 1 hoặc thêm nhiều tài khoản.',
+    'Chọn thao tác chỉnh sửa bên dưới.',
   ].join('\n');
 }
 
 function adminProductDetailKeyboard(product) {
   const toggleTo = product.is_active ? '0' : '1';
   return Markup.inlineKeyboard([
-    [Markup.button.callback(product.is_active ? 'Tạm ẩn sản phẩm' : 'Mở bán lại', `prdtg:${product.id}:${toggleTo}`)],
+    [Markup.button.callback(product.is_active ? '⏸ Tạm ẩn sản phẩm' : '▶️ Mở bán lại', `prdtg:${product.id}:${toggleTo}`)],
     [
-      Markup.button.callback('Thêm 1 TK', `admaddacc1:${product.id}`),
-      Markup.button.callback('Thêm nhiều TK', `admaddacc:${product.id}`),
+      Markup.button.callback('➕ 1 TK AUTO', `admaddacc1:${product.id}`),
+      Markup.button.callback('📥 Nhiều TK AUTO', `admaddacc:${product.id}`),
     ],
     [
-      Markup.button.callback('Sửa giá', `admsetprice:${product.id}`),
-      Markup.button.callback('Sửa tồn', `admsetstock:${product.id}`),
+      Markup.button.callback('💲 Sửa giá', `admsetprice:${product.id}`),
+      Markup.button.callback('📦 Sửa tồn', `admsetstock:${product.id}`),
     ],
-    [Markup.button.callback('Xóa sản phẩm', `admdelete:${product.id}`)],
-    [Markup.button.callback('Danh sách', 'admin_products_v2')],
+    [Markup.button.callback('🗑 Xóa sản phẩm', `admdelete:${product.id}`)],
+    [Markup.button.callback('↩ Danh sách', 'admin_products_v2')],
   ]);
 }
 
@@ -1805,8 +2082,7 @@ bot.command('history', async (ctx) => {
     return;
   }
 
-  const lines = orders.map((o) => `#${o.id} | ${STATUS_LABEL[o.status] || o.status} | ${o.total_amount} ${o.currency || 'VND'}`);
-  await ctx.reply(lines.join('\n'));
+  await ctx.reply(buildOrderHistoryPanel(orders, locale));
 });
 
 bot.command('support', async (ctx) => {
@@ -1818,8 +2094,7 @@ bot.command('support', async (ctx) => {
     return;
   }
 
-  const lines = channels.map((c) => `- ${c.name}: ${c.value}`);
-  await ctx.reply(lines.join('\n'));
+  await ctx.reply(buildSupportPanel(channels, locale));
 });
 
 bot.command('language', async (ctx) => {
@@ -1840,7 +2115,7 @@ bot.command('admin', async (ctx) => {
     return;
   }
 
-  await ctx.reply(t(locale, 'adminPanel'), adminMenu);
+  await sendAdminMainPanel(ctx);
 });
 
 bot.action('menu_admin', async (ctx) => {
@@ -1852,7 +2127,35 @@ bot.action('menu_admin', async (ctx) => {
   }
 
   await ctx.answerCbQuery();
-  await ctx.reply(t(locale, 'adminPanel'), adminMenu);
+  await sendAdminMainPanel(ctx, true);
+});
+
+bot.action('admin_home_refresh', async (ctx) => {
+  const user = await ensureUser(ctx);
+  const locale = getLocale(user);
+  if (!isAdmin(ctx, user)) {
+    await ctx.answerCbQuery(t(locale, 'noAdmin'), { show_alert: true });
+    return;
+  }
+
+  await ctx.answerCbQuery('Đã cập nhật');
+  await sendAdminMainPanel(ctx, true);
+});
+
+bot.action('admin_home_close', async (ctx) => {
+  const user = await ensureUser(ctx);
+  const locale = getLocale(user);
+  if (!isAdmin(ctx, user)) {
+    await ctx.answerCbQuery(t(locale, 'noAdmin'), { show_alert: true });
+    return;
+  }
+
+  await ctx.answerCbQuery();
+  try {
+    await ctx.deleteMessage();
+  } catch (error) {
+    await safeReply(ctx, 'Đã đóng admin panel.');
+  }
 });
 
 
@@ -1981,12 +2284,12 @@ bot.action(/^prd:(.+)$/, async (ctx) => {
   const details = buildProductDetailPanel(locale, product);
   await replaceOrReply(ctx, details, Markup.inlineKeyboard([
     [
-      Markup.button.callback('Mua x1', `buyq:${product.id}:1`),
-      Markup.button.callback('Mua x3', `buyq:${product.id}:3`),
-      Markup.button.callback('Mua x5', `buyq:${product.id}:5`),
+      Markup.button.callback('🛒 x1', `buyq:${product.id}:1`),
+      Markup.button.callback('🛒 x3', `buyq:${product.id}:3`),
+      Markup.button.callback('🛒 x5', `buyq:${product.id}:5`),
     ],
-    [Markup.button.callback('Nhập số lượng', `buyqinput:${product.id}`)],
-    [Markup.button.callback('\uD83D\uDDD1 X\u00f3a', 'prd_close')],
+    [Markup.button.callback('✍️ Nhập số lượng', `buyqinput:${product.id}`)],
+    [Markup.button.callback('\uD83D\uDDD1 Đóng', 'prd_close')],
   ]));
 });
 
@@ -2070,8 +2373,7 @@ bot.action('menu_support', async (ctx) => {
     return;
   }
 
-  const lines = channels.map((c) => `- ${c.name}: ${c.value}`);
-  await ctx.reply(lines.join('\n'));
+  await ctx.reply(buildSupportPanel(channels, locale));
 });
 
 bot.action('menu_language', async (ctx) => {
@@ -2137,6 +2439,38 @@ bot.action(/^paydone:(.+)$/, async (ctx) => {
   }
 });
 
+bot.action(/^paycancel:(.+)$/, async (ctx) => {
+  const user = await ensureUser(ctx);
+  const locale = getLocale(user);
+  const orderId = ctx.match[1];
+
+  const result = await cancelOrderByUser(orderId, user.id);
+  if (!result.ok) {
+    if (result.reason === 'not_found') {
+      await ctx.answerCbQuery(locale === 'en' ? 'Order not found' : 'Không tìm thấy đơn', { show_alert: true });
+      return;
+    }
+    if (result.reason === 'paid') {
+      await ctx.answerCbQuery(locale === 'en' ? 'Order already paid' : 'Đơn đã thanh toán', { show_alert: true });
+      return;
+    }
+    await ctx.answerCbQuery(locale === 'en' ? 'Unable to cancel now' : 'Không thể hủy lúc này', { show_alert: true });
+    return;
+  }
+
+  await ctx.answerCbQuery(result.alreadyCancelled ? 'Đã hủy trước đó' : 'Đã hủy đơn');
+  const clearKeyboard = { reply_markup: { inline_keyboard: [] } };
+  const text = locale === 'en'
+    ? `Order #${orderId} has been cancelled.`
+    : `Đơn #${orderId} đã được hủy.`;
+
+  if (ctx.callbackQuery?.message?.photo) {
+    await replaceCaptionOrReply(ctx, text, clearKeyboard);
+  } else {
+    await replaceOrReply(ctx, text, clearKeyboard);
+  }
+});
+
 bot.action(/^lang:(vi|en)$/, async (ctx) => {
   const user = await ensureUser(ctx);
   const target = ctx.match[1];
@@ -2157,15 +2491,26 @@ bot.action('admin_orders_new', async (ctx) => {
   await ctx.answerCbQuery();
   const orders = await loadAdminOrders();
 
-  if (orders.length === 0) {
-    await ctx.reply('Không có đơn mới.');
+  await replaceOrReply(ctx, buildAdminOrdersText(orders), buildAdminOrdersKeyboard(orders));
+});
+
+bot.action(/^admord:(.+)$/, async (ctx) => {
+  const user = await ensureUser(ctx);
+  const locale = getLocale(user);
+  if (!isAdmin(ctx, user)) {
+    await ctx.answerCbQuery(t(locale, 'noAdmin'), { show_alert: true });
     return;
   }
 
-  for (const order of orders) {
-    const info = `#${order.id} | user:${order.user_id}\n${order.total_amount} ${order.currency || 'VND'} | ${order.status}`;
-    await ctx.reply(info, orderActionKeyboard(order.id, order.status));
+  const orderId = ctx.match[1];
+  const order = await loadAdminOrderById(orderId);
+  if (!order) {
+    await ctx.answerCbQuery('Không tìm thấy đơn', { show_alert: true });
+    return;
   }
+
+  await ctx.answerCbQuery();
+  await replaceOrReply(ctx, adminOrderDetailText(order), orderActionKeyboard(order.id, order.status));
 });
 
 bot.action(/^ordst:(.+):(draft|confirmed|paid|cancelled)$/, async (ctx) => {
@@ -2221,7 +2566,11 @@ bot.action(/^ordst:(.+):(draft|confirmed|paid|cancelled)$/, async (ctx) => {
   }
 
   await ctx.answerCbQuery('Updated');
-  await ctx.reply(t(locale, 'orderStatusUpdated', { id: updated.id, status: updated.status }));
+  await replaceOrReply(
+    ctx,
+    `${adminOrderDetailText(updated)}\n\n${t(locale, 'orderStatusUpdated', { id: updated.id, status: updated.status })}`,
+    orderActionKeyboard(updated.id, updated.status),
+  );
 });
 
 bot.action(/^ordclr:(.+)$/, async (ctx) => {
@@ -2632,12 +2981,19 @@ bot.action('admin_reports', async (ctx) => {
   await ctx.answerCbQuery();
   const report = await loadReport();
 
-  await ctx.reply(
+  await replaceOrReply(
+    ctx,
     `${t(locale, 'reportTitle')}\n`
     + `- Total orders: ${report.totalOrders}\n`
     + `- Confirmed: ${report.confirmedOrders}\n`
     + `- Paid: ${report.paidOrders}\n`
-    + `- Revenue: ${report.revenue} VND`,
+    + `- Revenue: ${formatPriceVnd(report.revenue)} VND`,
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback('🔄 Làm mới', 'admin_reports'),
+        Markup.button.callback('🏠 Admin', 'menu_admin'),
+      ],
+    ]),
   );
 });
 
