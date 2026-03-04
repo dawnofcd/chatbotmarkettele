@@ -755,13 +755,23 @@ async function cancelOrderByUser(orderId, userId) {
     return { ok: false, reason: 'status_changed' };
   }
 
-  await restoreStockFromOrderItems(orderId);
-  await db.from('order_history').insert({
-    order_id: updatedOrder.id,
-    changed_by: userId,
-    status: 'cancelled',
-    comment: 'Cancelled by user from Telegram payment panel',
-  });
+  try {
+    await restoreStockFromOrderItems(orderId);
+  } catch (error) {
+    console.error('restoreStockFromOrderItems failed:', error);
+  }
+
+  try {
+    await db.from('order_history').insert({
+      order_id: updatedOrder.id,
+      changed_by: userId,
+      status: 'cancelled',
+      comment: 'Cancelled by user from Telegram payment panel',
+    });
+  } catch (error) {
+    console.error('order_history insert (cancelled) failed:', error);
+  }
+
   orderPaymentMessageRefs.delete(String(orderId));
 
   return { ok: true, alreadyCancelled: false, order: updatedOrder };
@@ -2440,34 +2450,43 @@ bot.action(/^paydone:(.+)$/, async (ctx) => {
 });
 
 bot.action(/^paycancel:(.+)$/, async (ctx) => {
-  const user = await ensureUser(ctx);
-  const locale = getLocale(user);
-  const orderId = ctx.match[1];
+  try {
+    const user = await ensureUser(ctx);
+    const locale = getLocale(user);
+    const orderId = ctx.match[1];
 
-  const result = await cancelOrderByUser(orderId, user.id);
-  if (!result.ok) {
-    if (result.reason === 'not_found') {
-      await ctx.answerCbQuery(locale === 'en' ? 'Order not found' : 'Không tìm thấy đơn', { show_alert: true });
+    const result = await cancelOrderByUser(orderId, user.id);
+    if (!result.ok) {
+      if (result.reason === 'not_found') {
+        await ctx.answerCbQuery(locale === 'en' ? 'Order not found' : 'Không tìm thấy đơn', { show_alert: true });
+        return;
+      }
+      if (result.reason === 'paid') {
+        await ctx.answerCbQuery(locale === 'en' ? 'Order already paid' : 'Đơn đã thanh toán', { show_alert: true });
+        return;
+      }
+      await ctx.answerCbQuery(locale === 'en' ? 'Unable to cancel now' : 'Không thể hủy lúc này', { show_alert: true });
       return;
     }
-    if (result.reason === 'paid') {
-      await ctx.answerCbQuery(locale === 'en' ? 'Order already paid' : 'Đơn đã thanh toán', { show_alert: true });
-      return;
+
+    await ctx.answerCbQuery(result.alreadyCancelled ? 'Đã hủy trước đó' : 'Đã hủy đơn');
+    const clearKeyboard = { reply_markup: { inline_keyboard: [] } };
+    const text = locale === 'en'
+      ? `Order #${orderId} has been cancelled.`
+      : `Đơn #${orderId} đã được hủy.`;
+
+    if (ctx.callbackQuery?.message?.photo) {
+      await replaceCaptionOrReply(ctx, text, clearKeyboard);
+    } else {
+      await replaceOrReply(ctx, text, clearKeyboard);
     }
-    await ctx.answerCbQuery(locale === 'en' ? 'Unable to cancel now' : 'Không thể hủy lúc này', { show_alert: true });
-    return;
-  }
-
-  await ctx.answerCbQuery(result.alreadyCancelled ? 'Đã hủy trước đó' : 'Đã hủy đơn');
-  const clearKeyboard = { reply_markup: { inline_keyboard: [] } };
-  const text = locale === 'en'
-    ? `Order #${orderId} has been cancelled.`
-    : `Đơn #${orderId} đã được hủy.`;
-
-  if (ctx.callbackQuery?.message?.photo) {
-    await replaceCaptionOrReply(ctx, text, clearKeyboard);
-  } else {
-    await replaceOrReply(ctx, text, clearKeyboard);
+  } catch (error) {
+    console.error('paycancel handler failed:', error);
+    try {
+      await ctx.answerCbQuery('Hủy đơn thất bại, thử lại sau', { show_alert: true });
+    } catch (nestedError) {
+      // no-op
+    }
   }
 });
 
