@@ -15,6 +15,18 @@ const mmobankAccountName = process.env.MMOBANK_ACCOUNT_NAME || process.env.SEPAY
 const mmobankWebhookPath = process.env.MMOBANK_WEBHOOK_PATH || process.env.SEPAY_WEBHOOK_PATH || '/mmobank/webhook';
 const webhookPort = Number(process.env.PORT || process.env.WEBHOOK_PORT || 3000);
 const supportZaloNumber = process.env.SUPPORT_ZALO || '0563228054';
+const supportShopName = process.env.SUPPORT_SHOP_NAME || 'Tài Nguyên Hero';
+const supportZaloGroup = process.env.SUPPORT_ZALO_GROUP || '';
+const supportTelegramContact = process.env.SUPPORT_TELEGRAM || '';
+const paymentTimeoutSecondsRaw = Number(process.env.PAYMENT_TIMEOUT_SECONDS || 60);
+const paymentTimeoutSeconds = Number.isFinite(paymentTimeoutSecondsRaw) && paymentTimeoutSecondsRaw > 0
+  ? Math.round(paymentTimeoutSecondsRaw)
+  : 60;
+const paymentTimeoutMs = paymentTimeoutSeconds * 1000;
+const notifyAllDelayMsRaw = Number(process.env.NOTIFY_ALL_DELAY_MS || 35);
+const notifyAllDelayMs = Number.isFinite(notifyAllDelayMsRaw) && notifyAllDelayMsRaw >= 0
+  ? Math.round(notifyAllDelayMsRaw)
+  : 35;
 const adminTelegramIds = new Set(
   (process.env.ADMIN_TELEGRAM_IDS || '')
     .split(',')
@@ -50,6 +62,7 @@ const runtimeAdminIds = new Set(adminTelegramIds);
 const pendingAdminInputs = new Map();
 const pendingUserInputs = new Map();
 const orderPaymentMessageRefs = new Map();
+const orderExpiryTimers = new Map();
 const inFlightCallbackUsers = new Set();
 
 function saveOrderPaymentMessageRef(orderId, chatId, messageId) {
@@ -87,6 +100,109 @@ async function clearOrderPaymentMessages(orderId) {
     }
   }
   orderPaymentMessageRefs.delete(oid);
+}
+
+function clearOrderExpiryTimer(orderId) {
+  const oid = String(orderId || '').trim();
+  if (!oid) {
+    return;
+  }
+
+  const current = orderExpiryTimers.get(oid);
+  if (current) {
+    clearTimeout(current);
+    orderExpiryTimers.delete(oid);
+  }
+}
+
+async function expireUnpaidOrder(orderId) {
+  const oid = String(orderId || '').trim();
+  if (!oid) {
+    return;
+  }
+
+  const { data: order, error: orderError } = await db
+    .from('orders')
+    .select('id,user_id,status,total_amount,currency')
+    .eq('id', oid)
+    .maybeSingle();
+  if (orderError) {
+    throw orderError;
+  }
+  if (!order || !['draft', 'confirmed'].includes(String(order.status || '').toLowerCase())) {
+    return;
+  }
+
+  const { data: updated, error: updateError } = await db
+    .from('orders')
+    .update({ status: 'cancelled' })
+    .eq('id', oid)
+    .in('status', ['draft', 'confirmed'])
+    .select('id,user_id,status,total_amount,currency')
+    .maybeSingle();
+  if (updateError) {
+    throw updateError;
+  }
+  if (!updated) {
+    return;
+  }
+
+  try {
+    await restoreStockFromOrderItems(updated.id);
+  } catch (error) {
+    console.error('restoreStockFromOrderItems failed (timeout):', error);
+  }
+
+  try {
+    await db.from('order_history').insert({
+      order_id: updated.id,
+      changed_by: null,
+      status: 'cancelled',
+      comment: `Auto-cancelled after ${paymentTimeoutSeconds}s without payment`,
+    });
+  } catch (error) {
+    console.error('order_history insert (timeout cancel) failed:', error);
+  }
+
+  await clearOrderPaymentMessages(updated.id);
+
+  try {
+    const { data: owner } = await db
+      .from('users')
+      .select('telegram_id')
+      .eq('id', updated.user_id)
+      .maybeSingle();
+    if (owner?.telegram_id) {
+      await bot.telegram.sendMessage(
+        Number(owner.telegram_id),
+        `Đơn #${updated.id} đã tự hủy do quá ${paymentTimeoutSeconds} giây chưa thanh toán.`,
+      );
+    }
+  } catch (error) {
+    // no-op
+  }
+}
+
+function scheduleOrderExpiry(orderId) {
+  const oid = String(orderId || '').trim();
+  if (!oid) {
+    return;
+  }
+
+  clearOrderExpiryTimer(oid);
+  const timer = setTimeout(async () => {
+    orderExpiryTimers.delete(oid);
+    try {
+      await expireUnpaidOrder(oid);
+    } catch (error) {
+      console.error('expireUnpaidOrder failed:', error);
+    }
+  }, paymentTimeoutMs);
+
+  if (typeof timer.unref === 'function') {
+    timer.unref();
+  }
+  orderExpiryTimers.set(oid, timer);
 }
 
 function parseAccountData(rawAccountData) {
@@ -392,6 +508,11 @@ function isSecretKeyValid(input) {
 function getCommandPayload(text, command) {
   const pattern = new RegExp(`^/${command}(?:@\\w+)?\\s*`, 'i');
   return (text || '').replace(pattern, '').trim();
+}
+
+function sleep(ms) {
+  const delay = Math.max(0, Number(ms) || 0);
+  return new Promise((resolve) => setTimeout(resolve, delay));
 }
 
 function slugifyName(name) {
@@ -773,9 +894,12 @@ async function cancelOrderByUser(orderId, userId) {
     return { ok: false, reason: 'not_found' };
   }
   if (order.status === 'paid') {
+    clearOrderExpiryTimer(orderId);
     return { ok: false, reason: 'paid', order };
   }
   if (order.status === 'cancelled') {
+    clearOrderExpiryTimer(orderId);
+    await clearOrderPaymentMessages(orderId);
     return { ok: true, alreadyCancelled: true, order };
   }
 
@@ -811,7 +935,8 @@ async function cancelOrderByUser(orderId, userId) {
     console.error('order_history insert (cancelled) failed:', error);
   }
 
-  orderPaymentMessageRefs.delete(String(orderId));
+  clearOrderExpiryTimer(orderId);
+  await clearOrderPaymentMessages(orderId);
 
   return { ok: true, alreadyCancelled: false, order: updatedOrder };
 }
@@ -1038,6 +1163,7 @@ async function markOrderPaidFromMmobank(order, event) {
   }
 
   if (order.status === 'paid') {
+    clearOrderExpiryTimer(order.id);
     return { ok: true, alreadyPaid: true, order };
   }
 
@@ -1052,6 +1178,7 @@ async function markOrderPaidFromMmobank(order, event) {
   if (updateError) {
     throw updateError;
   }
+  clearOrderExpiryTimer(updated.id);
 
   const txPart = event.transactionId ? `tx:${event.transactionId}` : 'tx:n/a';
   const amountPart = Number.isFinite(Number(event.amount)) ? `amount:${Math.round(Number(event.amount))}` : 'amount:n/a';
@@ -1217,6 +1344,61 @@ async function loadRecentUserOrders(userId) {
   }
 
   return data || [];
+}
+
+async function loadRecentUserPaidOrders(userId) {
+  const { data, error } = await db
+    .from('orders')
+    .select('id,status,total_amount,currency,created_at')
+    .eq('user_id', userId)
+    .eq('status', 'paid')
+    .order('created_at', { ascending: false })
+    .limit(10);
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
+async function loadUserPurchaseStats(userId) {
+  const { data, error } = await db
+    .from('orders')
+    .select('total_amount,currency')
+    .eq('user_id', userId)
+    .eq('status', 'paid')
+    .limit(5000);
+
+  if (error) {
+    throw error;
+  }
+
+  const rows = data || [];
+  const totalByCurrency = new Map();
+  for (const row of rows) {
+    const amount = Number(row.total_amount || 0);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      continue;
+    }
+    const currency = String(row.currency || 'VND').toUpperCase();
+    totalByCurrency.set(currency, (totalByCurrency.get(currency) || 0) + amount);
+  }
+
+  return {
+    paidOrdersCount: rows.length,
+    totalByCurrency,
+  };
+}
+
+function formatCurrencyTotals(totalByCurrency) {
+  const entries = [...(totalByCurrency?.entries?.() || [])];
+  if (!entries.length) {
+    return '0 VND';
+  }
+  return entries
+    .map(([currency, total]) => `${formatPriceVnd(total)} ${currency}`)
+    .join(' + ');
 }
 
 async function loadOrderByIdForUser(orderId, userId) {
@@ -1514,21 +1696,76 @@ function buildUserOrderDetailKeyboard(orderId, locale) {
   ]);
 }
 
-function buildSupportPanel(channels, locale) {
-  const lines = [
-    '━━━━━━━━━━━━━━━━━━━━━━',
-    locale === 'en' ? '💬 SUPPORT CHANNELS' : '💬 KÊNH HỖ TRỢ',
-    '━━━━━━━━━━━━━━━━━━━━━━',
-    '',
-  ];
+function resolveSupportContacts(channels) {
+  const info = {
+    shopName: supportShopName,
+    zalo: supportZaloNumber,
+    zaloGroup: supportZaloGroup,
+    telegram: supportTelegramContact,
+  };
 
-  for (const channel of channels) {
-    lines.push(`• ${channel.name}: ${channel.value}`);
+  for (const channel of (channels || [])) {
+    const value = String(channel?.value || '').trim();
+    if (!value) {
+      continue;
+    }
+
+    const type = String(channel?.type || '').toLowerCase();
+    const name = String(channel?.name || '').toLowerCase();
+    const isZaloGroup = /zalo\.me\/g\//i.test(value) || /zalo/.test(name) && /(group|nh[oó]m|box)/.test(name);
+
+    if (type === 'phone' || (/zalo/.test(name) && !isZaloGroup)) {
+      info.zalo = value;
+      continue;
+    }
+
+    if (isZaloGroup || (type === 'url' && /zalo\.me\/g\//i.test(value))) {
+      info.zaloGroup = value;
+      continue;
+    }
+
+    if (type === 'telegram' || /^@/.test(value) || /t\.me\//i.test(value)) {
+      info.telegram = value;
+      continue;
+    }
+
+    if (/shop/.test(name)) {
+      info.shopName = value;
+    }
   }
 
-  lines.push('');
-  lines.push(locale === 'en' ? 'Please provide order ID when contacting support.' : 'Vui lòng gửi kèm mã đơn khi cần hỗ trợ.');
-  return lines.join('\n');
+  return info;
+}
+
+function buildSupportPanel(channels, locale) {
+  const info = resolveSupportContacts(channels);
+  if (locale === 'en') {
+    return [
+      '💬 SUPPORT',
+      '',
+      '📱 Contact:',
+      `Shop Name: ${info.shopName}`,
+      '',
+      `📞 Zalo: ${info.zalo || 'N/A'}`,
+      `💬 Zalo Group: ${info.zaloGroup || 'N/A'}`,
+      `📲 Telegram: ${info.telegram || 'N/A'}`,
+      '',
+      'Need help? Contact us via any channel above.',
+    ].join('\n');
+  }
+
+  return [
+    '💬 HỖ TRỢ',
+    '',
+    '📱 Liên hệ:',
+    `Shop Name: ${info.shopName}`,
+    '',
+    `📞 Zalo: ${info.zalo || 'Chưa cập nhật'}`,
+    `💬 Box Zalo: ${info.zaloGroup || 'Chưa cập nhật'}`,
+    `📲 Telegram: ${info.telegram || 'Chưa cập nhật'}`,
+    '',
+    'Cần hỗ trợ? Liên hệ với chúng tôi qua bất kỳ kênh nào ở trên!',
+  ].join('\n');
 }
 
 async function loadSupportChannels() {
@@ -1917,6 +2154,14 @@ async function safeReply(ctx, text, extra) {
   }
 }
 
+async function safeAnswerCbQuery(ctx, text, extra) {
+  try {
+    await ctx.answerCbQuery(text, extra);
+  } catch (error) {
+    // no-op
+  }
+}
+
 async function replaceOrReply(ctx, text, extra) {
   try {
     await ctx.editMessageText(text, extra);
@@ -2159,6 +2404,7 @@ function buildMmobankInstruction(order) {
     `Chủ TK: ${mmobankAccountName || '(không bắt buộc)'}`,
     `Số tiền: ${formatPriceVnd(amount)} ${order.currency || 'VND'}`,
     `Nội dung CK: ${transferContent.toLowerCase()}`,
+    `⏱ Tự hủy sau ${paymentTimeoutSeconds}s nếu chưa thanh toán`,
     '━━━━━━━━━━━━━━━━━━',
   ];
 
@@ -2486,6 +2732,7 @@ async function processPurchase(ctx, user, locale, product, quantity = 1) {
     saveOrderPaymentMessageRef(order.id, paymentMessage.chat.id, paymentMessage.message_id);
   }
 
+  scheduleOrderExpiry(order.id);
   await notifyAdminsNewOrder(order.id, order.total_amount, order.currency || 'VND');
 }
 
@@ -2648,6 +2895,7 @@ function buildHelpMessage(locale, admin = false) {
       '/kho <ma_sp> - Xem kho tài khoản AUTO của sản phẩm',
       '/addproduct <ten>|<gia>|<currency>|<delivery>|<mo_ta> - Thêm sản phẩm nhanh',
       '/notify <telegram_id> <noi_dung> - Gửi tin nhắn thủ công',
+      '/notifyall <noi_dung> - Gửi thông báo cho toàn bộ user',
       '/cancel - Hủy thao tác nhập liệu đang chờ',
     ].join('\n');
   }
@@ -2690,6 +2938,8 @@ async function registerChatMenuCommands() {
     { command: 'checkorder', description: 'Kiem tra chi tiet don' },
     { command: 'kho', description: 'Xem kho tai khoan AUTO' },
     { command: 'addproduct', description: 'Them san pham nhanh' },
+    { command: 'notify', description: 'Gui thong bao 1 user' },
+    { command: 'notifyall', description: 'Gui thong bao tat ca user' },
   ];
 
   try {
@@ -2790,6 +3040,7 @@ bot.command('orders', async (ctx) => {
 bot.command('me', async (ctx) => {
   const user = await ensureUser(ctx);
   const locale = getLocale(user);
+  const stats = await loadUserPurchaseStats(user.id);
   const lines = [
     locale === 'en' ? '👤 ACCOUNT INFO' : '👤 THÔNG TIN TÀI KHOẢN',
     '',
@@ -2802,8 +3053,20 @@ bot.command('me', async (ctx) => {
     locale === 'en'
       ? `Language: ${getLocale(user)}`
       : `Ngôn ngữ: ${getLocale(user)}`,
+    '',
+    locale === 'en'
+      ? `✅ Purchased orders: ${stats.paidOrdersCount}`
+      : `✅ Đơn đã mua: ${stats.paidOrdersCount}`,
+    locale === 'en'
+      ? `💰 Total spent: ${formatCurrencyTotals(stats.totalByCurrency)}`
+      : `💰 Tổng tiền đã mua: ${formatCurrencyTotals(stats.totalByCurrency)}`,
   ];
-  await ctx.reply(lines.join('\n'));
+  await ctx.reply(
+    lines.join('\n'),
+    Markup.inlineKeyboard([
+      [Markup.button.callback(locale === 'en' ? '📦 View purchased orders' : '📦 Xem đơn hàng đã mua', 'me_orders_paid')],
+    ]),
+  );
 });
 
 bot.command('support', async (ctx) => {
@@ -2815,7 +3078,7 @@ bot.command('support', async (ctx) => {
     return;
   }
 
-  await ctx.reply(buildSupportPanel(channels, locale));
+  await ctx.reply(buildSupportPanel(channels, locale), { link_preview_options: { is_disabled: true } });
 });
 
 bot.command('language', async (ctx) => {
@@ -2986,6 +3249,56 @@ bot.command('claimadmin', async (ctx) => {
   await ctx.reply(t(locale, 'adminGranted'));
 });
 
+async function loadAllKnownUserTelegramIds() {
+  const { data, error } = await db
+    .from('users')
+    .select('telegram_id')
+    .not('telegram_id', 'is', null)
+    .order('created_at', { ascending: true })
+    .limit(50000);
+
+  if (error) {
+    throw error;
+  }
+
+  const unique = new Set();
+  for (const row of (data || [])) {
+    const telegramId = Number(row?.telegram_id);
+    if (Number.isInteger(telegramId) && telegramId > 0) {
+      unique.add(telegramId);
+    }
+  }
+  return [...unique];
+}
+
+async function broadcastMessageToAllKnownUsers(text) {
+  const telegramIds = await loadAllKnownUserTelegramIds();
+  const result = {
+    total: telegramIds.length,
+    sent: 0,
+    failed: 0,
+    errors: [],
+  };
+
+  for (const telegramId of telegramIds) {
+    try {
+      await bot.telegram.sendMessage(telegramId, text);
+      result.sent += 1;
+    } catch (error) {
+      result.failed += 1;
+      if (result.errors.length < 10) {
+        result.errors.push(`#${telegramId}: ${String(error?.message || 'send_failed').slice(0, 160)}`);
+      }
+    }
+
+    if (notifyAllDelayMs > 0) {
+      await sleep(notifyAllDelayMs);
+    }
+  }
+
+  return result;
+}
+
 bot.command('notify', async (ctx) => {
   const user = await ensureUser(ctx);
   const locale = getLocale(user);
@@ -3010,6 +3323,38 @@ bot.command('notify', async (ctx) => {
   } catch (error) {
     await ctx.reply(`Gửi thất bại: ${error.message}`);
   }
+});
+
+bot.command('notifyall', async (ctx) => {
+  const user = await ensureUser(ctx);
+  const locale = getLocale(user);
+  if (!isAdmin(ctx, user)) {
+    await ctx.reply(t(locale, 'noAdmin'));
+    return;
+  }
+
+  const message = getCommandPayload(ctx.message.text, 'notifyall');
+  if (!message) {
+    await ctx.reply('Dùng: /notifyall <noi_dung>');
+    return;
+  }
+
+  await ctx.reply('Đang gửi thông báo tới toàn bộ người dùng...');
+  const result = await broadcastMessageToAllKnownUsers(message);
+
+  const lines = [
+    '📣 Kết quả notifyall',
+    `Tổng user: ${result.total}`,
+    `Gửi thành công: ${result.sent}`,
+    `Gửi thất bại: ${result.failed}`,
+  ];
+  if (result.errors.length > 0) {
+    lines.push('');
+    lines.push('Một số lỗi mẫu:');
+    lines.push(...result.errors);
+  }
+
+  await ctx.reply(lines.join('\n'));
 });
 
 bot.command('addproduct', async (ctx) => {
@@ -3162,6 +3507,21 @@ bot.action('menu_history', async (ctx) => {
   await replaceOrReply(ctx, text, buildOrderHistoryKeyboard(orders, locale));
 });
 
+bot.action('me_orders_paid', async (ctx) => {
+  const user = await ensureUser(ctx);
+  const locale = getLocale(user);
+  await ctx.answerCbQuery();
+
+  const orders = await loadRecentUserPaidOrders(user.id);
+  if (orders.length === 0) {
+    await safeReply(ctx, locale === 'en' ? 'You do not have any purchased orders yet.' : 'Bạn chưa có đơn hàng đã mua.');
+    return;
+  }
+
+  const text = buildOrderHistoryPanel(orders, locale);
+  await replaceOrReply(ctx, text, buildOrderHistoryKeyboard(orders, locale));
+});
+
 bot.action(/^myord:(.+)$/, async (ctx) => {
   const user = await ensureUser(ctx);
   const locale = getLocale(user);
@@ -3201,7 +3561,7 @@ bot.action('menu_support', async (ctx) => {
     return;
   }
 
-  await ctx.reply(buildSupportPanel(channels, locale));
+  await ctx.reply(buildSupportPanel(channels, locale), { link_preview_options: { is_disabled: true } });
 });
 
 bot.action('menu_language', async (ctx) => {
@@ -3276,18 +3636,18 @@ bot.action(/^paycancel:(.+)$/, async (ctx) => {
     const result = await cancelOrderByUser(orderId, user.id);
     if (!result.ok) {
       if (result.reason === 'not_found') {
-        await ctx.answerCbQuery(locale === 'en' ? 'Order not found' : 'Không tìm thấy đơn', { show_alert: true });
+        await safeAnswerCbQuery(ctx, locale === 'en' ? 'Order not found' : 'Không tìm thấy đơn', { show_alert: true });
         return;
       }
       if (result.reason === 'paid') {
-        await ctx.answerCbQuery(locale === 'en' ? 'Order already paid' : 'Đơn đã thanh toán', { show_alert: true });
+        await safeAnswerCbQuery(ctx, locale === 'en' ? 'Order already paid' : 'Đơn đã thanh toán', { show_alert: true });
         return;
       }
-      await ctx.answerCbQuery(locale === 'en' ? 'Unable to cancel now' : 'Không thể hủy lúc này', { show_alert: true });
+      await safeAnswerCbQuery(ctx, locale === 'en' ? 'Unable to cancel now' : 'Không thể hủy lúc này', { show_alert: true });
       return;
     }
 
-    await ctx.answerCbQuery(result.alreadyCancelled ? 'Đã hủy trước đó' : 'Đã hủy đơn');
+    await safeAnswerCbQuery(ctx, result.alreadyCancelled ? 'Đã hủy trước đó' : 'Đã hủy đơn');
     const clearKeyboard = { reply_markup: { inline_keyboard: [] } };
     const text = locale === 'en'
       ? `Order #${orderId} has been cancelled.`
@@ -3300,11 +3660,7 @@ bot.action(/^paycancel:(.+)$/, async (ctx) => {
     }
   } catch (error) {
     console.error('paycancel handler failed:', error);
-    try {
-      await ctx.answerCbQuery('Hủy đơn thất bại, thử lại sau', { show_alert: true });
-    } catch (nestedError) {
-      // no-op
-    }
+    await safeAnswerCbQuery(ctx, 'Đơn có thể đã hết hạn hoặc đã xử lý.', { show_alert: true });
   }
 });
 
@@ -3381,8 +3737,14 @@ bot.action(/^ordst:(.+):(draft|confirmed|paid|cancelled)$/, async (ctx) => {
   });
 
   if (status === 'paid') {
+    clearOrderExpiryTimer(updated.id);
     await deliverAutoAccountsAfterPaid(updated);
     await clearOrderPaymentMessages(updated.id);
+  } else if (status === 'cancelled') {
+    clearOrderExpiryTimer(updated.id);
+    await clearOrderPaymentMessages(updated.id);
+  } else {
+    scheduleOrderExpiry(updated.id);
   }
 
   const { data: owner } = await db
