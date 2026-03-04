@@ -34,6 +34,7 @@ const runtimeAdminIds = new Set(adminTelegramIds);
 const pendingAdminInputs = new Map();
 const pendingUserInputs = new Map();
 const orderPaymentMessageRefs = new Map();
+const inFlightCallbackUsers = new Set();
 
 function saveOrderPaymentMessageRef(orderId, chatId, messageId) {
   const oid = String(orderId || '').trim();
@@ -70,6 +71,69 @@ async function clearOrderPaymentMessages(orderId) {
     }
   }
   orderPaymentMessageRefs.delete(oid);
+}
+
+function parseAccountData(rawAccountData) {
+  const raw = String(rawAccountData || '').trim();
+  if (!raw) {
+    return { account: '(trong)', password: '(trong)', twofa: '(khong co)' };
+  }
+
+  const parts = raw.split('|').map((part) => String(part || '').trim());
+  return {
+    account: parts[0] || '(trong)',
+    password: parts[1] || '(trong)',
+    twofa: parts[2] || '(khong co)',
+  };
+}
+
+function buildPaidDeliveryMessage(order, sections, shortageCount) {
+  const orderCode = String(order?.id || '').toUpperCase();
+  const productName = sections[0]?.productName || '(khong ro)';
+
+  const lines = [
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '🧾 THÔNG TIN ĐƠN HÀNG',
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '',
+    `🔐 Mã đơn: #${orderCode}`,
+    `📦 Sản phẩm: ${productName}`,
+    '',
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '📌 TÀI KHOẢN (định dạng: TK | MK | 2FA)',
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '',
+  ];
+
+  for (const section of sections) {
+    if (sections.length > 1) {
+      lines.push(`• ${section.productName}`);
+      lines.push('');
+    }
+
+    section.accounts.forEach((accountData, index) => {
+      const parsed = parseAccountData(accountData);
+      lines.push(`${index + 1}️⃣ ${parsed.account}`);
+      lines.push(`🔑 Mật khẩu: ${parsed.password}`);
+      lines.push(`🛡 2FA: ${parsed.twofa}`);
+      lines.push('');
+    });
+  }
+
+  lines.push('━━━━━━━━━━━━━━━━━━━━━━');
+  lines.push('⚠️ LƯU Ý QUAN TRỌNG');
+  lines.push('━━━━━━━━━━━━━━━━━━━━━━');
+  lines.push('');
+  lines.push('• Đổi mật khẩu ngay sau khi đăng nhập');
+  lines.push('• Bật lại bảo mật theo thông tin cá nhân của bạn');
+  lines.push('• Không chia sẻ tài khoản cho bên thứ ba');
+  if (shortageCount > 0) {
+    lines.push('• Còn thiếu một số tài khoản, vui lòng nhắn admin để được cấp bổ sung');
+  }
+  lines.push('');
+  lines.push('Chúc bạn sử dụng dịch vụ thuận lợi ✅');
+  lines.push('━━━━━━━━━━━━━━━━━━━━━━');
+  return lines.join('\n');
 }
 
 const TEXTS = {
@@ -700,7 +764,7 @@ async function deliverAutoAccountsAfterPaid(order) {
   }
 
   const productMap = new Map((products || []).map((p) => [p.id, p]));
-  const lines = [];
+  const sections = [];
   let deliveredCount = 0;
   let shortageCount = 0;
 
@@ -735,9 +799,10 @@ async function deliverAutoAccountsAfterPaid(order) {
 
     if (accounts.length > 0) {
       deliveredCount += accounts.length;
-      lines.push(
-        `San pham: ${product.name || item.product_id}\n${accounts.map((acc, idx) => `${idx + 1}. ${acc}`).join('\n')}`,
-      );
+      sections.push({
+        productName: product.name || item.product_id,
+        accounts,
+      });
     }
 
     if (accounts.length < quantity) {
@@ -745,7 +810,7 @@ async function deliverAutoAccountsAfterPaid(order) {
     }
   }
 
-  if (lines.length === 0) {
+  if (sections.length === 0) {
     return { deliveredCount: 0, shortageCount };
   }
 
@@ -766,12 +831,15 @@ async function deliverAutoAccountsAfterPaid(order) {
   }
 
   if (owner?.telegram_id) {
-    let text = `Tai khoan don #${order.id} (dinh dang tk|mk|2fa):\n\n${lines.join('\n\n')}\n\nLuu y: Doi mat khau ngay sau khi nhan.`;
-    if (shortageCount > 0) {
-      text += '\nCon thieu mot so tai khoan auto. Vui long nhan admin de duoc cap bo sung.';
-    }
+    const text = buildPaidDeliveryMessage(order, sections, shortageCount);
     try {
-      await bot.telegram.sendMessage(Number(owner.telegram_id), text);
+      await bot.telegram.sendMessage(
+        Number(owner.telegram_id),
+        text,
+        Markup.inlineKeyboard([
+          [Markup.button.callback('🧹 Clear trò chuyện', `ordclr:${order.id}`)],
+        ]),
+      );
       await db.from('order_history').insert({
         order_id: order.id,
         changed_by: null,
@@ -1012,6 +1080,53 @@ async function loadOrderByIdForUser(orderId, userId) {
   return data;
 }
 
+function buildOrderHistoryPanel(orders, locale) {
+  const rows = Array.isArray(orders) ? orders : [];
+  const normalizeStatus = (value) => String(value || '').toLowerCase();
+  const statusIcon = (status) => {
+    if (status === 'paid') {
+      return '\uD83D\uDFE2';
+    }
+    if (status === 'confirmed') {
+      return '\uD83D\uDD35';
+    }
+    if (status === 'cancelled') {
+      return '\uD83D\uDD34';
+    }
+    return '\u26AA';
+  };
+
+  const lines = [];
+  lines.push('━━━━━━━━━━━━━━━━━━━━━━');
+  lines.push(locale === 'en' ? '\uD83D\uDCCA ORDER HISTORY' : '\uD83D\uDCCA LICH SU DON HANG');
+  lines.push('━━━━━━━━━━━━━━━━━━━━━━');
+  lines.push('');
+  lines.push(locale === 'en' ? '\uD83D\uDFE2 = Paid' : '\uD83D\uDFE2 = Da thanh toan');
+  lines.push(locale === 'en' ? '\uD83D\uDD35 = Confirmed' : '\uD83D\uDD35 = Da xac nhan');
+  lines.push('');
+  lines.push('──────────────────────');
+  lines.push('');
+
+  let totalAmount = 0;
+  for (const order of rows) {
+    const amount = Number(order.total_amount || 0);
+    totalAmount += Number.isFinite(amount) ? amount : 0;
+    const status = normalizeStatus(order.status);
+    const icon = statusIcon(status);
+    const idText = String(order.id || '').toUpperCase();
+    const currency = order.currency || 'VND';
+    lines.push(`${icon} #${idText}`);
+    lines.push(`\uD83D\uDCB0 ${formatPriceVnd(amount)} ${currency}`);
+    lines.push('');
+  }
+
+  lines.push('──────────────────────');
+  lines.push(`${locale === 'en' ? '\uD83D\uDCCC Total orders' : '\uD83D\uDCCC Tong don'}: ${rows.length}`);
+  lines.push(`${locale === 'en' ? '\uD83D\uDCB5 Total amount' : '\uD83D\uDCB5 Tong tien'}: ${formatPriceVnd(totalAmount)} VND`);
+  lines.push('━━━━━━━━━━━━━━━━━━━━━━');
+  return lines.join('\n');
+}
+
 async function loadSupportChannels() {
   const { data, error } = await db
     .from('support_channels')
@@ -1131,6 +1246,24 @@ async function safeReply(ctx, text, extra) {
     await ctx.reply(text, extra);
   } catch (error) {
     // no-op
+  }
+}
+
+async function replaceOrReply(ctx, text, extra) {
+  try {
+    await ctx.editMessageText(text, extra);
+    return;
+  } catch (error) {
+    await safeReply(ctx, text, extra);
+  }
+}
+
+async function replaceCaptionOrReply(ctx, caption, extra) {
+  try {
+    await ctx.editMessageCaption(caption, extra);
+    return;
+  } catch (error) {
+    await safeReply(ctx, caption, extra);
   }
 }
 
@@ -1377,41 +1510,21 @@ function formatDong(value) {
   return `${formatPriceVnd(value)}\u0111`;
 }
 
-function calcTierPrice(basePrice, ratio) {
-  const base = Number(basePrice || 0);
-  if (!Number.isFinite(base) || base <= 0) {
-    return 0;
-  }
-  return Math.round(base * ratio);
-}
-
 function calcUnitPriceByQuantity(basePrice, quantity) {
-  if (quantity >= 10) {
-    return calcTierPrice(basePrice, 0.8);
-  }
-  if (quantity >= 5) {
-    return calcTierPrice(basePrice, 0.875);
-  }
+  void quantity;
   return Math.round(Number(basePrice || 0));
 }
 
 function buildProductDetailPanel(locale, product) {
   const box = '\uD83D\uDCE6';
   const money = '\uD83D\uDCB0';
-  const chart = '\uD83D\uDCC9';
   const stockText = Number.isFinite(Number(product.stock_quantity)) ? Number(product.stock_quantity) : '-';
-  const p5 = calcTierPrice(product.price, 0.875);
-  const p10 = calcTierPrice(product.price, 0.8);
 
   if (locale === 'en') {
     return [
       `${box} ${product.name}`,
       `${money} Price: ${formatDong(product.price)}`,
       `${box} Stock: ${stockText}`,
-      `${chart} Tier price:`,
-      '',
-      `- From 5: ${formatDong(p5)}`,
-      `- From 10: ${formatDong(p10)}`,
       '',
       'Choose payment method:',
     ].join('\n');
@@ -1421,10 +1534,6 @@ function buildProductDetailPanel(locale, product) {
     `${box} ${product.name}`,
     `${money} Gi\u00e1: ${formatDong(product.price)}`,
     `${box} C\u00f2n: ${stockText}`,
-    `${chart} Gi\u00e1 theo SL:`,
-    '',
-    `- T\u1eeb 5: ${formatDong(p5)}`,
-    `- T\u1eeb 10: ${formatDong(p10)}`,
     '',
     'Ch\u1ecdn ph\u01b0\u01a1ng th\u1ee9c thanh to\u00e1n:',
   ].join('\n');
@@ -1499,7 +1608,13 @@ async function processPurchase(ctx, user, locale, product, quantity = 1) {
     currency: order.currency || 'VND',
   });
 
-  await ctx.reply(`${message}\nSố lượng: ${qty}\nĐơn giá: ${unitPrice} ${order.currency || 'VND'}`);
+  const deliveryNote = product.delivery_type === 'auto'
+    ? 'Sau khi chuyen khoan thanh cong, bot se tu dong gui tai khoan cho ban.'
+    : (product.manual_contact_note
+      || 'Loại không auto. Sau khi chuyển khoản thành công, vui lòng nhắn admin để nhận tài khoản.');
+  await ctx.reply(
+    `${message}\nSố lượng: ${qty}\nĐơn giá: ${unitPrice} ${order.currency || 'VND'}\n${deliveryNote}`,
+  );
 
   const mmobank = buildMmobankInstruction(order);
   let paymentMessage = null;
@@ -1530,14 +1645,6 @@ async function processPurchase(ctx, user, locale, product, quantity = 1) {
 
   if (paymentMessage?.chat?.id && Number.isInteger(paymentMessage.message_id)) {
     saveOrderPaymentMessageRef(order.id, paymentMessage.chat.id, paymentMessage.message_id);
-  }
-
-  if (product.delivery_type === 'auto') {
-    await ctx.reply('Sau khi chuyen khoan thanh cong, bot se tu dong gui tai khoan cho ban.');
-  } else {
-    const manualNote = product.manual_contact_note
-      || 'Loại không auto. Sau khi chuyển khoản thành công, vui lòng nhắn admin để nhận tài khoản.';
-    await ctx.reply(manualNote);
   }
 
   await notifyAdminsNewOrder(order.id, order.total_amount, order.currency || 'VND');
@@ -1653,6 +1760,29 @@ async function registerChatMenuCommands() {
 
   await bot.telegram.setMyCommands(commands);
 }
+
+bot.use(async (ctx, next) => {
+  if (!ctx.callbackQuery) {
+    return next();
+  }
+
+  const userId = String(ctx.from?.id || '');
+  if (!userId) {
+    return next();
+  }
+
+  if (inFlightCallbackUsers.has(userId)) {
+    await ctx.answerCbQuery('Đang xử lý, vui lòng chờ...');
+    return;
+  }
+
+  inFlightCallbackUsers.add(userId);
+  try {
+    await next();
+  } finally {
+    inFlightCallbackUsers.delete(userId);
+  }
+});
 
 bot.start(async (ctx) => {
   const user = await ensureUser(ctx);
@@ -1833,7 +1963,7 @@ bot.action('menu_catalogue', async (ctx) => {
   const user = await ensureUser(ctx);
   const locale = getLocale(user);
   await ctx.answerCbQuery();
-  await sendCataloguePanel(ctx, locale);
+  await sendCataloguePanel(ctx, locale, true);
 });
 
 bot.action(/^prd:(.+)$/, async (ctx) => {
@@ -1849,7 +1979,7 @@ bot.action(/^prd:(.+)$/, async (ctx) => {
   }
 
   const details = buildProductDetailPanel(locale, product);
-  await ctx.reply(details, Markup.inlineKeyboard([
+  await replaceOrReply(ctx, details, Markup.inlineKeyboard([
     [
       Markup.button.callback('Mua x1', `buyq:${product.id}:1`),
       Markup.button.callback('Mua x3', `buyq:${product.id}:3`),
@@ -1925,8 +2055,8 @@ bot.action('menu_history', async (ctx) => {
     return;
   }
 
-  const lines = orders.map((o) => `#${o.id} | ${STATUS_LABEL[o.status] || o.status} | ${o.total_amount} ${o.currency || 'VND'}`);
-  await ctx.reply(lines.join('\n'));
+  const text = buildOrderHistoryPanel(orders, locale);
+  await ctx.reply(text);
 });
 
 bot.action('menu_support', async (ctx) => {
@@ -1984,11 +2114,15 @@ bot.action(/^paydone:(.+)$/, async (ctx) => {
 
   const transferContent = buildMmobankTransferCode(order.id);
   await ctx.answerCbQuery(locale === 'en' ? 'Sent to admin' : 'Đã báo admin');
-  await ctx.reply(
-    locale === 'en'
-      ? `Payment notice sent. Admin will verify your transfer.\nOrder: #${order.id}\nTransfer content: ${transferContent}`
-      : `Đã gửi báo thanh toán cho admin. Vui lòng chờ xác nhận.\nĐơn: #${order.id}\nNội dung CK: ${transferContent}`,
-  );
+  const confirmation = locale === 'en'
+    ? `Payment notice sent. Admin will verify your transfer.\nOrder: #${order.id}\nTransfer content: ${transferContent}`
+    : `Đã gửi báo thanh toán cho admin. Vui lòng chờ xác nhận.\nĐơn: #${order.id}\nNội dung CK: ${transferContent}`;
+  const clearKeyboard = { reply_markup: { inline_keyboard: [] } };
+  if (ctx.callbackQuery?.message?.photo) {
+    await replaceCaptionOrReply(ctx, confirmation, clearKeyboard);
+  } else {
+    await replaceOrReply(ctx, confirmation, clearKeyboard);
+  }
 
   const adminIds = [...runtimeAdminIds].map((id) => Number(id)).filter(Number.isInteger);
   for (const telegramId of adminIds) {
@@ -2090,6 +2224,38 @@ bot.action(/^ordst:(.+):(draft|confirmed|paid|cancelled)$/, async (ctx) => {
   await ctx.reply(t(locale, 'orderStatusUpdated', { id: updated.id, status: updated.status }));
 });
 
+bot.action(/^ordclr:(.+)$/, async (ctx) => {
+  const user = await ensureUser(ctx);
+  const orderId = String(ctx.match[1] || '').trim();
+  if (!orderId) {
+    await ctx.answerCbQuery('Order not found', { show_alert: true });
+    return;
+  }
+
+  const { data: order, error } = await db
+    .from('orders')
+    .select('id,user_id')
+    .eq('id', orderId)
+    .maybeSingle();
+  if (error || !order) {
+    await ctx.answerCbQuery('Order not found', { show_alert: true });
+    return;
+  }
+
+  if (order.user_id !== user.id && !isAdmin(ctx, user)) {
+    await ctx.answerCbQuery('Khong co quyen', { show_alert: true });
+    return;
+  }
+
+  await ctx.answerCbQuery('Đang dọn tin nhắn...');
+  await clearOrderPaymentMessages(orderId);
+  try {
+    await ctx.deleteMessage();
+  } catch (errorDelete) {
+    // no-op
+  }
+});
+
 bot.action(/^prdtg:(.+):(0|1)$/, async (ctx) => {
   const user = await ensureUser(ctx);
   const locale = getLocale(user);
@@ -2124,7 +2290,7 @@ bot.action('admin_products_v2', async (ctx) => {
 
   clearPendingAdminInput(ctx);
   await ctx.answerCbQuery();
-  await sendAdminProductsPanel(ctx);
+  await sendAdminProductsPanel(ctx, true);
 });
 
 bot.action('admin_products_refresh', async (ctx) => {
@@ -2172,7 +2338,7 @@ bot.action(/^admprd:(.+)$/, async (ctx) => {
   }
 
   await ctx.answerCbQuery();
-  await ctx.reply(adminProductDetailText(product), adminProductDetailKeyboard(product));
+  await replaceOrReply(ctx, adminProductDetailText(product), adminProductDetailKeyboard(product));
 });
 
 bot.action(/^admsetprice:(.+)$/, async (ctx) => {
