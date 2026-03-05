@@ -70,6 +70,7 @@ const pendingUserInputs = new Map();
 const orderPaymentMessageRefs = new Map();
 const orderExpiryTimers = new Map();
 const inFlightCallbackUsers = new Set();
+const ORDER_MESSAGE_REF_PREFIX = '__MSGREF__';
 
 function saveOrderPaymentMessageRef(orderId, chatId, messageId) {
   const oid = String(orderId || '').trim();
@@ -87,6 +88,77 @@ function saveOrderPaymentMessageRef(orderId, chatId, messageId) {
   }
 }
 
+function buildOrderMessageRefComment(kind, chatId, messageId) {
+  return `${ORDER_MESSAGE_REF_PREFIX}:${String(kind || 'payment')}:${Number(chatId)}:${Number(messageId)}`;
+}
+
+function parseOrderMessageRefComment(comment) {
+  const raw = String(comment || '').trim();
+  const pattern = new RegExp(`^${ORDER_MESSAGE_REF_PREFIX}:([a-zA-Z0-9_-]+):(-?\\d+):(\\d+)$`);
+  const match = raw.match(pattern);
+  if (!match) {
+    return null;
+  }
+
+  const chatId = Number(match[2]);
+  const messageId = Number(match[3]);
+  if (!Number.isInteger(chatId) || !Number.isInteger(messageId)) {
+    return null;
+  }
+  return { kind: match[1], chatId, messageId };
+}
+
+async function persistOrderMessageRef(orderId, chatId, messageId, kind = 'payment') {
+  const oid = String(orderId || '').trim();
+  const cid = Number(chatId);
+  const mid = Number(messageId);
+  if (!oid || !Number.isInteger(cid) || !Number.isInteger(mid)) {
+    return;
+  }
+
+  try {
+    await db.from('order_history').insert({
+      order_id: oid,
+      changed_by: null,
+      status: 'internal',
+      comment: buildOrderMessageRefComment(kind, cid, mid),
+    });
+  } catch (error) {
+    // Do not block purchase flow when telemetry insert fails.
+  }
+}
+
+async function loadPersistedOrderMessageRefs(orderId) {
+  const oid = String(orderId || '').trim();
+  if (!oid) {
+    return [];
+  }
+
+  const { data, error } = await db
+    .from('order_history')
+    .select('comment')
+    .eq('order_id', oid)
+    .order('created_at', { ascending: false })
+    .limit(200);
+  if (error) {
+    throw error;
+  }
+
+  const refs = [];
+  for (const row of (data || [])) {
+    const parsed = parseOrderMessageRefComment(row.comment);
+    if (parsed) {
+      refs.push({ chatId: parsed.chatId, messageId: parsed.messageId });
+    }
+  }
+  return refs;
+}
+
+async function rememberOrderPaymentMessageRef(orderId, chatId, messageId, kind = 'payment') {
+  saveOrderPaymentMessageRef(orderId, chatId, messageId);
+  await persistOrderMessageRef(orderId, chatId, messageId, kind);
+}
+
 async function clearOrderPaymentMessages(orderId) {
   const oid = String(orderId || '').trim();
   if (!oid) {
@@ -94,11 +166,29 @@ async function clearOrderPaymentMessages(orderId) {
   }
 
   const refs = orderPaymentMessageRefs.get(oid) || [];
-  if (!refs.length) {
-    return;
+  let persistedRefs = [];
+  try {
+    persistedRefs = await loadPersistedOrderMessageRefs(oid);
+  } catch (error) {
+    // no-op: fallback to in-memory refs only
   }
 
-  for (const ref of refs) {
+  const dedup = new Map();
+  for (const ref of [...refs, ...persistedRefs]) {
+    const chatId = Number(ref?.chatId);
+    const messageId = Number(ref?.messageId);
+    if (!Number.isInteger(chatId) || !Number.isInteger(messageId)) {
+      continue;
+    }
+    dedup.set(`${chatId}:${messageId}`, { chatId, messageId });
+  }
+
+  const finalRefs = [...dedup.values()];
+  if (!finalRefs.length) {
+    orderPaymentMessageRefs.delete(oid);
+    return;
+  }
+  for (const ref of finalRefs) {
     try {
       await bot.telegram.deleteMessage(ref.chatId, ref.messageId);
     } catch (error) {
@@ -189,12 +279,13 @@ async function expireUnpaidOrder(orderId) {
   }
 }
 
-function scheduleOrderExpiry(orderId) {
+function scheduleOrderExpiry(orderId, delayMs = paymentTimeoutMs) {
   const oid = String(orderId || '').trim();
   if (!oid) {
     return;
   }
 
+  const timeoutMs = Number.isFinite(Number(delayMs)) ? Math.max(0, Math.round(Number(delayMs))) : paymentTimeoutMs;
   clearOrderExpiryTimer(oid);
   const timer = setTimeout(async () => {
     orderExpiryTimers.delete(oid);
@@ -203,12 +294,51 @@ function scheduleOrderExpiry(orderId) {
     } catch (error) {
       console.error('expireUnpaidOrder failed:', error);
     }
-  }, paymentTimeoutMs);
+  }, timeoutMs);
 
   if (typeof timer.unref === 'function') {
     timer.unref();
   }
   orderExpiryTimers.set(oid, timer);
+}
+
+async function restorePendingOrderExpirySchedules() {
+  const { data: pendingOrders, error } = await db
+    .from('orders')
+    .select('id,status,created_at')
+    .in('status', ['draft', 'confirmed'])
+    .order('created_at', { ascending: false })
+    .limit(5000);
+  if (error) {
+    throw error;
+  }
+
+  const now = Date.now();
+  let scheduledCount = 0;
+  let expiredNowCount = 0;
+  const rows = pendingOrders || [];
+
+  for (const order of rows) {
+    const createdAtMs = Date.parse(String(order.created_at || ''));
+    if (!Number.isFinite(createdAtMs)) {
+      scheduleOrderExpiry(order.id);
+      scheduledCount += 1;
+      continue;
+    }
+
+    const elapsedMs = now - createdAtMs;
+    const remainingMs = paymentTimeoutMs - elapsedMs;
+    if (remainingMs <= 0) {
+      await expireUnpaidOrder(order.id);
+      expiredNowCount += 1;
+      continue;
+    }
+
+    scheduleOrderExpiry(order.id, remainingMs);
+    scheduledCount += 1;
+  }
+
+  console.log(`Order expiry restored: scheduled=${scheduledCount}, expired_now=${expiredNowCount}`);
 }
 
 function parseAccountData(rawAccountData) {
@@ -1416,15 +1546,29 @@ async function loadOrderItemPreviewByOrderIds(orderIds) {
 
   const { data, error } = await db
     .from('order_items')
-    .select('order_id,product_id,quantity,products(name)')
+    .select('order_id,product_id,quantity')
     .in('order_id', normalizedIds)
     .order('created_at', { ascending: true });
   if (error) {
     throw error;
   }
 
+  const rows = data || [];
+  const productIds = [...new Set(rows.map((row) => String(row.product_id || '').trim()).filter(Boolean))];
+  let productNameById = new Map();
+  if (productIds.length) {
+    const { data: productRows, error: productError } = await db
+      .from('products')
+      .select('id,name')
+      .in('id', productIds);
+    if (productError) {
+      throw productError;
+    }
+    productNameById = new Map((productRows || []).map((row) => [row.id, row.name]));
+  }
+
   const byOrder = new Map();
-  for (const row of (data || [])) {
+  for (const row of rows) {
     const orderId = String(row.order_id || '').trim();
     if (!orderId) continue;
 
@@ -1434,7 +1578,7 @@ async function loadOrderItemPreviewByOrderIds(orderIds) {
       totalQuantity: 0,
     };
     const qty = Math.max(0, Number(row.quantity || 0));
-    const productName = String(row.products?.name || row.product_id || '').trim();
+    const productName = String(productNameById.get(String(row.product_id || '').trim()) || row.product_id || '').trim();
     if (!current.firstProductName && productName) {
       current.firstProductName = productName;
     }
@@ -1568,11 +1712,25 @@ async function loadUserOrderDetail(orderId, userId) {
 
   const { data: items, error: itemsError } = await db
     .from('order_items')
-    .select('product_id,quantity,unit_price,total_price,products(name,delivery_type)')
+    .select('product_id,quantity,unit_price,total_price')
     .eq('order_id', orderId)
     .order('created_at', { ascending: true });
   if (itemsError) {
     throw itemsError;
+  }
+
+  const itemRows = items || [];
+  const productIds = [...new Set(itemRows.map((item) => String(item.product_id || '').trim()).filter(Boolean))];
+  let productsById = new Map();
+  if (productIds.length) {
+    const { data: productRows, error: productError } = await db
+      .from('products')
+      .select('id,name,delivery_type')
+      .in('id', productIds);
+    if (productError) {
+      throw productError;
+    }
+    productsById = new Map((productRows || []).map((row) => [row.id, row]));
   }
 
   const { data: accounts, error: accountsError } = await db
@@ -1584,7 +1742,16 @@ async function loadUserOrderDetail(orderId, userId) {
     throw accountsError;
   }
 
-  let itemList = items || [];
+  let itemList = itemRows.map((item) => {
+    const product = productsById.get(String(item.product_id || '').trim());
+    return {
+      ...item,
+      products: {
+        name: product?.name || null,
+        delivery_type: product?.delivery_type || null,
+      },
+    };
+  });
   const accountRows = accounts || [];
 
   // Fallback for legacy orders that may have missing order_items rows:
@@ -1643,14 +1810,38 @@ async function loadAdminOrderDetail(orderId) {
 
   const { data: items, error: itemsError } = await db
     .from('order_items')
-    .select('product_id,quantity,unit_price,total_price,products(name)')
+    .select('product_id,quantity,unit_price,total_price')
     .eq('order_id', orderId)
     .order('created_at', { ascending: true });
   if (itemsError) {
     throw itemsError;
   }
 
-  return { ...order, items: items || [] };
+  const itemRows = items || [];
+  const productIds = [...new Set(itemRows.map((item) => String(item.product_id || '').trim()).filter(Boolean))];
+  let productsById = new Map();
+  if (productIds.length) {
+    const { data: productRows, error: productError } = await db
+      .from('products')
+      .select('id,name')
+      .in('id', productIds);
+    if (productError) {
+      throw productError;
+    }
+    productsById = new Map((productRows || []).map((row) => [row.id, row]));
+  }
+
+  const normalizedItems = itemRows.map((item) => {
+    const product = productsById.get(String(item.product_id || '').trim());
+    return {
+      ...item,
+      products: {
+        name: product?.name || null,
+      },
+    };
+  });
+
+  return { ...order, items: normalizedItems };
 }
 
 async function findAdminOrderByKeyword(keyword) {
@@ -2955,7 +3146,10 @@ async function processPurchase(ctx, user, locale, product, quantity = 1) {
 
   const order = await createSingleItemOrder(user.id, product, qty);
   const unitPrice = calcUnitPriceByQuantity(product.price, qty);
-  await ctx.reply(buildOrderCreatedMessage(order, product, qty, unitPrice));
+  const createdMessage = await ctx.reply(buildOrderCreatedMessage(order, product, qty, unitPrice));
+  if (createdMessage?.chat?.id && Number.isInteger(createdMessage.message_id)) {
+    await rememberOrderPaymentMessageRef(order.id, createdMessage.chat.id, createdMessage.message_id, 'created');
+  }
 
   const mmobank = buildMmobankInstruction(order);
   let paymentMessage = null;
@@ -2988,7 +3182,7 @@ async function processPurchase(ctx, user, locale, product, quantity = 1) {
   }
 
   if (paymentMessage?.chat?.id && Number.isInteger(paymentMessage.message_id)) {
-    saveOrderPaymentMessageRef(order.id, paymentMessage.chat.id, paymentMessage.message_id);
+    await rememberOrderPaymentMessageRef(order.id, paymentMessage.chat.id, paymentMessage.message_id, 'payment');
   }
 
   scheduleOrderExpiry(order.id);
@@ -4731,6 +4925,7 @@ const webhookServer = startMmobankWebhookServer();
 
 bot.launch().then(async () => {
   await registerChatMenuCommands();
+  await restorePendingOrderExpirySchedules();
   console.log('Bot launched.');
 }).catch((err) => {
   console.error('Failed to launch bot', err);
