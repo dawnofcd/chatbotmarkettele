@@ -1282,6 +1282,17 @@ async function notifyOrderOwnerStatusChanged(order) {
   }
 }
 
+async function deleteProductWithFallback(productId) {
+  const linkedOrderItems = await countOrderItemsByProductId(productId);
+  if (linkedOrderItems > 0) {
+    await updateAdminProduct(productId, { is_active: false });
+    return { mode: 'soft_hidden', linkedOrderItems };
+  }
+
+  await hardDeleteProduct(productId);
+  return { mode: 'hard_deleted', linkedOrderItems: 0 };
+}
+
 function sendJson(res, statusCode, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(statusCode, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -1715,6 +1726,12 @@ function renderAdminDashboardPage({
     const accountLink = usingAccounts
       ? `<a class="btn-small link-like" href="${escapeHtml(buildAdminDashboardUrl({ tab: 'accounts', product_id: product.id }))}">Mở kho</a>`
       : '';
+    const deleteForm = [
+      `<form method="post" action="${escapeHtml(`${adminDashboardPath}/product-delete`)}">`,
+      `  <input type="hidden" name="product_id" value="${escapeHtml(product.id)}" />`,
+      '  <button class="btn-small btn-action btn-cancel" type="submit">Xóa / Ẩn</button>',
+      '</form>',
+    ].join('\n');
 
     return [
       '<tr>',
@@ -1733,19 +1750,37 @@ function renderAdminDashboardPage({
       '    </form>',
       '  </td>',
       `  <td>${escapeHtml(formatDashboardDateTime(product.updated_at))}</td>`,
-      `  <td class="actions">${syncForm}${accountLink}</td>`,
+      `  <td class="actions">${syncForm}${accountLink}${deleteForm}</td>`,
       '</tr>',
     ].join('\n');
   }).join('\n');
+
+  const createProductForm = [
+    `<form class="create-form" method="post" action="${escapeHtml(`${adminDashboardPath}/product-create`)}">`,
+    '  <label>Tên sản phẩm <input name="name" type="text" placeholder="Ví dụ: Netflix Premium 1 tháng" required /></label>',
+    '  <label>Giá <input name="price" type="number" min="0" step="1" value="0" required /></label>',
+    '  <label>Tiền tệ <input name="currency" type="text" value="VND" maxlength="8" /></label>',
+    '  <label>Loại',
+    '    <select name="product_kind" required>',
+    '      <option value="code">Code</option>',
+    '      <option value="account" selected>Account</option>',
+    '      <option value="support">Support</option>',
+    '    </select>',
+    '  </label>',
+    '  <label>Mô tả <input name="description" type="text" placeholder="Mô tả ngắn cho sản phẩm" /></label>',
+    '  <button type="submit">Tạo sản phẩm</button>',
+    '</form>',
+  ].join('\n');
 
   const productPanel = [
     '<section class="panel">',
     '  <div class="panel-head">',
     '    <div>',
-    '      <h2>Sản phẩm</h2>',
-    '      <p class="panel-subtitle">Sửa nhanh giá, tồn kho, trạng thái bán và đồng bộ kho key/account.</p>',
+      '      <h2>Sản phẩm</h2>',
+      '      <p class="panel-subtitle">Sửa nhanh giá, tồn kho, trạng thái bán và đồng bộ kho key/account.</p>',
     '    </div>',
     '  </div>',
+    `  ${createProductForm}`,
     '  <div class="table-wrap">',
     '    <table>',
       '      <thead><tr><th>ID</th><th>Tên</th><th>Loại</th><th>Delivery</th><th>Giá / Tồn / Active</th><th>Cập nhật</th><th>Kho account</th></tr></thead>',
@@ -1782,6 +1817,23 @@ function renderAdminDashboardPage({
         ? '<span class="status-badge cancelled">used</span>'
         : '<span class="status-badge paid">available</span>';
       const orderCell = row.used_order_id ? `<code>${escapeHtml(row.used_order_id)}</code>` : '-';
+      const stateForm = [
+        `<form method="post" action="${escapeHtml(`${adminDashboardPath}/account-state`)}">`,
+        `  <input type="hidden" name="product_id" value="${escapeHtml(selectedProduct.id)}" />`,
+        `  <input type="hidden" name="account_id" value="${escapeHtml(row.id)}" />`,
+        `  <input type="hidden" name="target" value="${row.is_used ? '0' : '1'}" />`,
+        `  <button class="btn-small btn-action ${row.is_used ? 'btn-neutral' : 'btn-paid'}" type="submit">${row.is_used ? 'Unuse' : 'Use'}</button>`,
+        '</form>',
+      ].join('\n');
+      const deleteForm = row.is_used
+        ? ''
+        : [
+          `<form method="post" action="${escapeHtml(`${adminDashboardPath}/account-delete`)}">`,
+          `  <input type="hidden" name="product_id" value="${escapeHtml(selectedProduct.id)}" />`,
+          `  <input type="hidden" name="account_id" value="${escapeHtml(row.id)}" />`,
+          '  <button class="btn-small btn-action btn-cancel" type="submit">Xóa</button>',
+          '</form>',
+        ].join('\n');
       return [
         '<tr>',
         `  <td>${index + 1}</td>`,
@@ -1790,6 +1842,7 @@ function renderAdminDashboardPage({
         `  <td>${escapeHtml(parsed.twofa)}</td>`,
         `  <td>${statusBadge}</td>`,
         `  <td>${orderCell}</td>`,
+        `  <td class="actions">${stateForm}${deleteForm}</td>`,
         '</tr>',
       ].join('\n');
     }).join('\n');
@@ -1812,8 +1865,8 @@ function renderAdminDashboardPage({
       '  </form>',
       '  <div class="table-wrap">',
       '    <table>',
-      '      <thead><tr><th>#</th><th>Account</th><th>Password</th><th>2FA</th><th>State</th><th>Order used</th></tr></thead>',
-      `      <tbody>${accountRows || '<tr><td colspan="6">Kho trống.</td></tr>'}</tbody>`,
+      '      <thead><tr><th>#</th><th>Account</th><th>Password</th><th>2FA</th><th>State</th><th>Order used</th><th>Hành động</th></tr></thead>',
+      `      <tbody>${accountRows || '<tr><td colspan="7">Kho trống.</td></tr>'}</tbody>`,
       '    </table>',
       '  </div>',
     ].join('\n');
@@ -1891,6 +1944,9 @@ function renderAdminDashboardPage({
     '    .stock-badge.low { background: #fff1ee; border-color: #f7bbb3; color: #b42318; }',
     '    .actions { display: flex; flex-wrap: wrap; gap: 6px; }',
     '    .inline-form { display: inline-flex; gap: 8px; align-items: center; flex-wrap: wrap; }',
+    '    .create-form { display: grid; grid-template-columns: minmax(210px, 2fr) repeat(4, minmax(120px, 1fr)) auto; gap: 8px; align-items: end; padding: 10px; margin-bottom: 10px; border: 1px solid #dbe6f2; border-radius: 12px; background: #f9fcff; }',
+    '    .create-form label { display: grid; gap: 4px; font-size: 12px; color: #475467; }',
+    '    .create-form button { height: 38px; white-space: nowrap; }',
     '    .product-form label { display: inline-flex; align-items: center; gap: 6px; color: #475467; font-size: 12px; }',
     '    input[type="number"], select, textarea { border: 1px solid #cdd9e5; border-radius: 10px; padding: 7px 9px; font-size: 13px; color: var(--text); background: #fff; }',
     '    textarea { width: 100%; min-height: 170px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }',
@@ -1908,7 +1964,8 @@ function renderAdminDashboardPage({
     '    .tagline { display: inline-flex; gap: 8px; align-items: center; margin-right: 8px; }',
     '    .account-form { display: grid; gap: 8px; margin-bottom: 10px; }',
     '    .actions-row { display: flex; gap: 8px; flex-wrap: wrap; }',
-    '    @media (max-width: 930px) { .hero h1 { font-size: 25px; } .tabs { width: 100%; justify-content: space-between; } .tab { flex: 1; text-align: center; } .panel { padding: 10px; } }',
+    '    @media (max-width: 1180px) { .create-form { grid-template-columns: 1fr 1fr; } .create-form button { grid-column: span 2; } }',
+    '    @media (max-width: 930px) { .hero h1 { font-size: 25px; } .tabs { width: 100%; justify-content: space-between; } .tab { flex: 1; text-align: center; } .panel { padding: 10px; } .create-form { grid-template-columns: 1fr; } .create-form button { grid-column: span 1; } }',
   '  </style>',
     '</head>',
     '<body>',
@@ -1941,18 +1998,26 @@ async function handleAdminDashboardRequest(req, res, requestUrl) {
   const loginPath = `${adminDashboardPath}/login`;
   const logoutPath = `${adminDashboardPath}/logout`;
   const orderStatusPath = `${adminDashboardPath}/order-status`;
+  const productCreatePath = `${adminDashboardPath}/product-create`;
   const productUpdatePath = `${adminDashboardPath}/product-update`;
+  const productDeletePath = `${adminDashboardPath}/product-delete`;
   const productSyncPath = `${adminDashboardPath}/product-sync`;
   const accountAddPath = `${adminDashboardPath}/account-add`;
+  const accountDeletePath = `${adminDashboardPath}/account-delete`;
+  const accountStatePath = `${adminDashboardPath}/account-state`;
 
   if (
     pathname !== adminDashboardPath
     && pathname !== loginPath
     && pathname !== logoutPath
     && pathname !== orderStatusPath
+    && pathname !== productCreatePath
     && pathname !== productUpdatePath
+    && pathname !== productDeletePath
     && pathname !== productSyncPath
     && pathname !== accountAddPath
+    && pathname !== accountDeletePath
+    && pathname !== accountStatePath
   ) {
     return false;
   }
@@ -2043,6 +2108,45 @@ async function handleAdminDashboardRequest(req, res, requestUrl) {
     }
   }
 
+  if (pathname === productCreatePath && req.method === 'POST') {
+    const rawBody = await readRawRequestBody(req);
+    const form = parseFormUrlEncoded(rawBody);
+    const name = String(form.name || '').trim();
+    const price = parsePositiveMoney(String(form.price || '').trim());
+    const currency = String(form.currency || 'VND').trim().toUpperCase() || 'VND';
+    const productKind = normalizeAddProductType(form.product_kind);
+    const description = String(form.description || '').trim();
+    if (!name || price === null || !productKind) {
+      redirectResponse(res, buildAdminDashboardUrl({
+        tab: 'products',
+        err: 'Dữ liệu tạo sản phẩm chưa hợp lệ.',
+      }));
+      return true;
+    }
+
+    try {
+      const created = await createProduct({
+        name,
+        price,
+        currency,
+        productKind,
+        description,
+        deliveryType: productKind === 'support' ? 'manual' : 'auto',
+      });
+      redirectResponse(res, buildAdminDashboardUrl({
+        tab: 'products',
+        msg: `Đã tạo sản phẩm: ${created.name}`,
+      }));
+      return true;
+    } catch (error) {
+      redirectResponse(res, buildAdminDashboardUrl({
+        tab: 'products',
+        err: `Tạo sản phẩm thất bại: ${String(error.message || 'unknown')}`,
+      }));
+      return true;
+    }
+  }
+
   if (pathname === productUpdatePath && req.method === 'POST') {
     const rawBody = await readRawRequestBody(req);
     const form = parseFormUrlEncoded(rawBody);
@@ -2075,6 +2179,49 @@ async function handleAdminDashboardRequest(req, res, requestUrl) {
         tab: 'products',
         err: `Cập nhật sản phẩm thất bại: ${String(error.message || 'unknown')}`,
       }));
+      return true;
+    }
+  }
+
+  if (pathname === productDeletePath && req.method === 'POST') {
+    const rawBody = await readRawRequestBody(req);
+    const form = parseFormUrlEncoded(rawBody);
+    const productId = String(form.product_id || '').trim();
+    if (!productId) {
+      redirectResponse(res, buildAdminDashboardUrl({
+        tab: 'products',
+        err: 'Thiếu product_id để xóa sản phẩm.',
+      }));
+      return true;
+    }
+
+    try {
+      const result = await deleteProductWithFallback(productId);
+      if (result.mode === 'soft_hidden') {
+        redirectResponse(res, buildAdminDashboardUrl({
+          tab: 'products',
+          msg: `SP có ${result.linkedOrderItems} dòng đơn, đã chuyển tạm ẩn thay vì xóa cứng.`,
+        }));
+      } else {
+        redirectResponse(res, buildAdminDashboardUrl({
+          tab: 'products',
+          msg: 'Đã xóa sản phẩm.',
+        }));
+      }
+      return true;
+    } catch (error) {
+      try {
+        await updateAdminProduct(productId, { is_active: false });
+        redirectResponse(res, buildAdminDashboardUrl({
+          tab: 'products',
+          msg: 'Không thể xóa cứng, đã chuyển tạm ẩn.',
+        }));
+      } catch (nestedError) {
+        redirectResponse(res, buildAdminDashboardUrl({
+          tab: 'products',
+          err: `Xóa sản phẩm thất bại: ${String(error.message || 'unknown')}`,
+        }));
+      }
       return true;
     }
   }
@@ -2135,6 +2282,101 @@ async function handleAdminDashboardRequest(req, res, requestUrl) {
         tab: 'accounts',
         product_id: productId,
         err: `Thêm account thất bại: ${String(error.message || 'unknown')}`,
+      }));
+      return true;
+    }
+  }
+
+  if (pathname === accountDeletePath && req.method === 'POST') {
+    const rawBody = await readRawRequestBody(req);
+    const form = parseFormUrlEncoded(rawBody);
+    const accountId = String(form.account_id || '').trim();
+    const productId = String(form.product_id || '').trim();
+    if (!accountId) {
+      redirectResponse(res, buildAdminDashboardUrl({
+        tab: 'accounts',
+        product_id: productId,
+        err: 'Thiếu account_id để xóa.',
+      }));
+      return true;
+    }
+
+    try {
+      const account = await loadProductAccountById(accountId);
+      if (!account) {
+        redirectResponse(res, buildAdminDashboardUrl({
+          tab: 'accounts',
+          product_id: productId,
+          err: 'Không tìm thấy account.',
+        }));
+        return true;
+      }
+      if (account.is_used) {
+        redirectResponse(res, buildAdminDashboardUrl({
+          tab: 'accounts',
+          product_id: account.product_id || productId,
+          err: 'Account đã used, không xóa trực tiếp.',
+        }));
+        return true;
+      }
+
+      await deleteProductAccountById(accountId);
+      await syncProductStockFromAutoAccounts(account.product_id);
+      redirectResponse(res, buildAdminDashboardUrl({
+        tab: 'accounts',
+        product_id: account.product_id,
+        msg: 'Đã xóa account khỏi kho.',
+      }));
+      return true;
+    } catch (error) {
+      redirectResponse(res, buildAdminDashboardUrl({
+        tab: 'accounts',
+        product_id: productId,
+        err: `Xóa account thất bại: ${String(error.message || 'unknown')}`,
+      }));
+      return true;
+    }
+  }
+
+  if (pathname === accountStatePath && req.method === 'POST') {
+    const rawBody = await readRawRequestBody(req);
+    const form = parseFormUrlEncoded(rawBody);
+    const accountId = String(form.account_id || '').trim();
+    const productId = String(form.product_id || '').trim();
+    const target = String(form.target || '').trim() === '1';
+    if (!accountId) {
+      redirectResponse(res, buildAdminDashboardUrl({
+        tab: 'accounts',
+        product_id: productId,
+        err: 'Thiếu account_id để chuyển trạng thái.',
+      }));
+      return true;
+    }
+
+    try {
+      const account = await loadProductAccountById(accountId);
+      if (!account) {
+        redirectResponse(res, buildAdminDashboardUrl({
+          tab: 'accounts',
+          product_id: productId,
+          err: 'Không tìm thấy account.',
+        }));
+        return true;
+      }
+
+      await setProductAccountUsedState(accountId, target, null);
+      await syncProductStockFromAutoAccounts(account.product_id);
+      redirectResponse(res, buildAdminDashboardUrl({
+        tab: 'accounts',
+        product_id: account.product_id,
+        msg: target ? 'Đã chuyển account sang used.' : 'Đã chuyển account về available.',
+      }));
+      return true;
+    } catch (error) {
+      redirectResponse(res, buildAdminDashboardUrl({
+        tab: 'accounts',
+        product_id: productId,
+        err: `Cập nhật account thất bại: ${String(error.message || 'unknown')}`,
       }));
       return true;
     }
