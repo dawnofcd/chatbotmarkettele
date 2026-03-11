@@ -343,6 +343,24 @@ class QueryBuilder {
 function createClient(config) {
   const pool = new Pool(config);
   return {
+    async query(sql, params = []) {
+      try {
+        const text = String(sql || '').trim();
+        if (!text) {
+          throw new Error('SQL query is empty');
+        }
+
+        const values = Array.isArray(params) ? params : [];
+        const res = await pool.query(text, values);
+        return {
+          data: res.rows || [],
+          error: null,
+          count: Number.isInteger(res.rowCount) ? res.rowCount : null,
+        };
+      } catch (error) {
+        return { data: null, error, count: null };
+      }
+    },
     from(table) {
       return new QueryBuilder(pool, table);
     },

@@ -1598,7 +1598,7 @@ function parseFormUrlEncoded(rawBody) {
 
 function normalizeDashboardTab(rawTab) {
   const tab = String(rawTab || '').trim().toLowerCase();
-  if (tab === 'products' || tab === 'accounts') {
+  if (tab === 'products' || tab === 'accounts' || tab === 'reports') {
     return tab;
   }
   return 'orders';
@@ -1697,6 +1697,216 @@ async function loadDashboardProducts(limit = 120, scope = 'active') {
   return data || [];
 }
 
+function parseDashboardNumber(value) {
+  const parsed = Number(value || 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeDashboardCurrency(value) {
+  const currency = String(value || 'VND').trim().toUpperCase();
+  return currency || 'VND';
+}
+
+function createEmptyDashboardReports() {
+  return {
+    snapshot: {
+      today: [],
+      month: [],
+      year: [],
+    },
+    byProduct: [],
+    byDay: [],
+    byMonth: [],
+    byYear: [],
+  };
+}
+
+function normalizeDashboardReports(reports) {
+  const empty = createEmptyDashboardReports();
+  if (!reports || typeof reports !== 'object') {
+    return empty;
+  }
+
+  const snapshot = reports.snapshot && typeof reports.snapshot === 'object'
+    ? reports.snapshot
+    : {};
+
+  return {
+    snapshot: {
+      today: Array.isArray(snapshot.today) ? snapshot.today : [],
+      month: Array.isArray(snapshot.month) ? snapshot.month : [],
+      year: Array.isArray(snapshot.year) ? snapshot.year : [],
+    },
+    byProduct: Array.isArray(reports.byProduct) ? reports.byProduct : [],
+    byDay: Array.isArray(reports.byDay) ? reports.byDay : [],
+    byMonth: Array.isArray(reports.byMonth) ? reports.byMonth : [],
+    byYear: Array.isArray(reports.byYear) ? reports.byYear : [],
+  };
+}
+
+function formatDashboardRevenueByCurrency(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) {
+    return '0 VND';
+  }
+
+  return list
+    .map((row) => `${formatPriceVnd(row.totalRevenue)} ${normalizeDashboardCurrency(row.currency)}`)
+    .join(' | ');
+}
+
+function formatDashboardPeriodLabel(periodKey, periodType) {
+  const raw = String(periodKey || '').trim();
+  if (!raw) {
+    return '-';
+  }
+
+  if (periodType === 'day') {
+    const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (match) {
+      return `${match[3]}/${match[2]}/${match[1]}`;
+    }
+  }
+
+  if (periodType === 'month') {
+    const match = raw.match(/^(\d{4})-(\d{2})$/);
+    if (match) {
+      return `${match[2]}/${match[1]}`;
+    }
+  }
+
+  return raw;
+}
+
+async function loadDashboardReports() {
+  const snapshotSql = `
+    select
+      coalesce(o.currency, 'VND') as currency,
+      coalesce(sum(case
+        when timezone('Asia/Ho_Chi_Minh', o.created_at)::date = timezone('Asia/Ho_Chi_Minh', now())::date
+          then o.total_amount
+        else 0
+      end), 0) as revenue_today,
+      coalesce(sum(case
+        when date_trunc('month', timezone('Asia/Ho_Chi_Minh', o.created_at)) = date_trunc('month', timezone('Asia/Ho_Chi_Minh', now()))
+          then o.total_amount
+        else 0
+      end), 0) as revenue_month,
+      coalesce(sum(case
+        when date_trunc('year', timezone('Asia/Ho_Chi_Minh', o.created_at)) = date_trunc('year', timezone('Asia/Ho_Chi_Minh', now()))
+          then o.total_amount
+        else 0
+      end), 0) as revenue_year
+    from orders o
+    group by coalesce(o.currency, 'VND')
+    order by coalesce(o.currency, 'VND') asc
+  `;
+  const byProductSql = `
+    select
+      oi.product_id,
+      coalesce(p.name, oi.product_id::text) as product_name,
+      coalesce(o.currency, 'VND') as currency,
+      coalesce(sum(oi.quantity), 0)::bigint as total_quantity,
+      coalesce(sum(oi.total_price), 0) as total_revenue,
+      count(distinct oi.order_id)::bigint as total_orders
+    from order_items oi
+    join orders o on o.id = oi.order_id
+    left join products p on p.id = oi.product_id
+    group by oi.product_id, p.name, coalesce(o.currency, 'VND')
+    order by coalesce(sum(oi.total_price), 0) desc, coalesce(sum(oi.quantity), 0) desc, coalesce(p.name, oi.product_id::text) asc
+  `;
+  const byDaySql = `
+    select
+      to_char(timezone('Asia/Ho_Chi_Minh', o.created_at), 'YYYY-MM-DD') as period_key,
+      coalesce(o.currency, 'VND') as currency,
+      count(*)::bigint as order_count,
+      coalesce(sum(o.total_amount), 0) as total_revenue
+    from orders o
+    group by period_key, coalesce(o.currency, 'VND')
+    order by period_key desc, coalesce(o.currency, 'VND') asc
+  `;
+  const byMonthSql = `
+    select
+      to_char(timezone('Asia/Ho_Chi_Minh', o.created_at), 'YYYY-MM') as period_key,
+      coalesce(o.currency, 'VND') as currency,
+      count(*)::bigint as order_count,
+      coalesce(sum(o.total_amount), 0) as total_revenue
+    from orders o
+    group by period_key, coalesce(o.currency, 'VND')
+    order by period_key desc, coalesce(o.currency, 'VND') asc
+  `;
+  const byYearSql = `
+    select
+      to_char(timezone('Asia/Ho_Chi_Minh', o.created_at), 'YYYY') as period_key,
+      coalesce(o.currency, 'VND') as currency,
+      count(*)::bigint as order_count,
+      coalesce(sum(o.total_amount), 0) as total_revenue
+    from orders o
+    group by period_key, coalesce(o.currency, 'VND')
+    order by period_key desc, coalesce(o.currency, 'VND') asc
+  `;
+
+  const [snapshotResp, byProductResp, byDayResp, byMonthResp, byYearResp] = await Promise.all([
+    db.query(snapshotSql),
+    db.query(byProductSql),
+    db.query(byDaySql),
+    db.query(byMonthSql),
+    db.query(byYearSql),
+  ]);
+
+  if (snapshotResp.error) throw snapshotResp.error;
+  if (byProductResp.error) throw byProductResp.error;
+  if (byDayResp.error) throw byDayResp.error;
+  if (byMonthResp.error) throw byMonthResp.error;
+  if (byYearResp.error) throw byYearResp.error;
+
+  const snapshot = {
+    today: [],
+    month: [],
+    year: [],
+  };
+  for (const row of (snapshotResp.data || [])) {
+    const currency = normalizeDashboardCurrency(row.currency);
+    const revenueToday = parseDashboardNumber(row.revenue_today);
+    const revenueMonth = parseDashboardNumber(row.revenue_month);
+    const revenueYear = parseDashboardNumber(row.revenue_year);
+
+    if (revenueToday !== 0) {
+      snapshot.today.push({ currency, totalRevenue: revenueToday });
+    }
+    if (revenueMonth !== 0) {
+      snapshot.month.push({ currency, totalRevenue: revenueMonth });
+    }
+    if (revenueYear !== 0) {
+      snapshot.year.push({ currency, totalRevenue: revenueYear });
+    }
+  }
+
+  const byProduct = (byProductResp.data || []).map((row) => ({
+    productId: String(row.product_id || '').trim(),
+    productName: String(row.product_name || row.product_id || '').trim(),
+    currency: normalizeDashboardCurrency(row.currency),
+    totalQuantity: Math.max(0, Math.round(parseDashboardNumber(row.total_quantity))),
+    totalRevenue: parseDashboardNumber(row.total_revenue),
+    totalOrders: Math.max(0, Math.round(parseDashboardNumber(row.total_orders))),
+  }));
+
+  const mapPeriodRows = (rows) => (rows || []).map((row) => ({
+    periodKey: String(row.period_key || '').trim(),
+    currency: normalizeDashboardCurrency(row.currency),
+    orderCount: Math.max(0, Math.round(parseDashboardNumber(row.order_count))),
+    totalRevenue: parseDashboardNumber(row.total_revenue),
+  }));
+
+  return {
+    snapshot,
+    byProduct,
+    byDay: mapPeriodRows(byDayResp.data),
+    byMonth: mapPeriodRows(byMonthResp.data),
+    byYear: mapPeriodRows(byYearResp.data),
+  };
+}
+
 function renderAdminDashboardLoginPage(errorText = '') {
   const errorBlock = errorText
     ? `<div class="alert alert-error">${escapeHtml(errorText)}</div>`
@@ -1757,11 +1967,13 @@ function renderAdminDashboardPage({
   selectedProductId = '',
   selectedProduct = null,
   accountSummary = null,
+  reports = createEmptyDashboardReports(),
 }) {
   const safeTab = normalizeDashboardTab(tab);
   const safeStatusFilter = normalizeDashboardOrderStatus(statusFilter);
   const safeProductScope = normalizeDashboardProductScope(productScope);
   const safeAccountScope = normalizeDashboardAccountScope(accountScope);
+  const normalizedReports = normalizeDashboardReports(reports);
   const orderStatusOptions = ['all', 'draft', 'confirmed', 'paid', 'cancelled'];
   const statusMeta = {
     all: { label: 'Tất cả', className: 'neutral' },
@@ -1782,6 +1994,7 @@ function renderAdminDashboardPage({
   const navOrdersClass = safeTab === 'orders' ? 'tab active' : 'tab';
   const navProductsClass = safeTab === 'products' ? 'tab active' : 'tab';
   const navAccountsClass = safeTab === 'accounts' ? 'tab active' : 'tab';
+  const navReportsClass = safeTab === 'reports' ? 'tab active' : 'tab';
   const accountProducts = products.filter((product) => usesAccountInventory(product));
   const effectiveSelectedProductId = String(
     selectedProductId
@@ -1794,6 +2007,7 @@ function renderAdminDashboardPage({
     `<a class="${navOrdersClass}" href="${escapeHtml(buildAdminDashboardUrl({ tab: 'orders', status_filter: safeStatusFilter, products_scope: safeProductScope }))}">Đơn hàng</a>`,
     `<a class="${navProductsClass}" href="${escapeHtml(buildAdminDashboardUrl({ tab: 'products', products_scope: safeProductScope }))}">Sản phẩm</a>`,
     `<a class="${navAccountsClass}" href="${escapeHtml(buildAdminDashboardUrl({ tab: 'accounts', product_id: effectiveSelectedProductId, products_scope: safeProductScope, account_scope: safeAccountScope }))}">Kho account</a>`,
+    `<a class="${navReportsClass}" href="${escapeHtml(buildAdminDashboardUrl({ tab: 'reports', products_scope: safeProductScope }))}">Thống kê</a>`,
   ].join('');
 
   const orderStats = {
@@ -2109,11 +2323,114 @@ function renderAdminDashboardPage({
   }
   accountPanel += '</section>';
 
+  const reportSnapshotCards = [
+    {
+      title: 'Doanh thu hôm nay',
+      value: formatDashboardRevenueByCurrency(normalizedReports.snapshot.today),
+      tone: 'green',
+    },
+    {
+      title: 'Doanh thu tháng này',
+      value: formatDashboardRevenueByCurrency(normalizedReports.snapshot.month),
+      tone: 'teal',
+    },
+    {
+      title: 'Doanh thu năm nay',
+      value: formatDashboardRevenueByCurrency(normalizedReports.snapshot.year),
+      tone: 'blue',
+    },
+  ];
+  const reportSnapshotCardsHtml = reportSnapshotCards.map((card) => [
+    `<article class="stat-card tone-${escapeHtml(card.tone)}">`,
+    `  <h3>${escapeHtml(card.title)}</h3>`,
+    `  <p class="stat-multi">${escapeHtml(card.value)}</p>`,
+    '</article>',
+  ].join('\n')).join('\n');
+
+  const reportProductRows = normalizedReports.byProduct.map((row, index) => [
+    '<tr>',
+    `  <td>${index + 1}</td>`,
+    `  <td>${escapeHtml(row.productName || '(không rõ)')}</td>`,
+    `  <td><code>${escapeHtml(row.productId || '-')}</code></td>`,
+    `  <td>${escapeHtml(String(row.totalQuantity))}</td>`,
+    `  <td>${escapeHtml(formatPriceVnd(row.totalRevenue))}</td>`,
+    `  <td>${escapeHtml(String(row.totalOrders))}</td>`,
+    `  <td>${escapeHtml(row.currency || 'VND')}</td>`,
+    '</tr>',
+  ].join('\n')).join('\n');
+
+  const buildReportPeriodRows = (rows, periodType) => rows.map((row) => [
+    '<tr>',
+    `  <td>${escapeHtml(formatDashboardPeriodLabel(row.periodKey, periodType))}</td>`,
+    `  <td>${escapeHtml(String(row.orderCount))}</td>`,
+    `  <td>${escapeHtml(formatPriceVnd(row.totalRevenue))}</td>`,
+    `  <td>${escapeHtml(row.currency || 'VND')}</td>`,
+    '</tr>',
+  ].join('\n')).join('\n');
+
+  const reportByDayRows = buildReportPeriodRows(normalizedReports.byDay, 'day');
+  const reportByMonthRows = buildReportPeriodRows(normalizedReports.byMonth, 'month');
+  const reportByYearRows = buildReportPeriodRows(normalizedReports.byYear, 'year');
+
+  const reportPanel = [
+    '<section class="panel">',
+    '  <div class="panel-head">',
+    '    <div>',
+    '      <h2>Thống kê</h2>',
+    '      <p class="panel-subtitle">Báo cáo theo sản phẩm và doanh thu theo ngày/tháng/năm (toàn bộ lịch sử).</p>',
+    '    </div>',
+    '  </div>',
+    `  <section class="stat-grid">${reportSnapshotCardsHtml}</section>`,
+    '  <section class="report-section">',
+    '    <h3>Theo sản phẩm</h3>',
+    '    <div class="table-wrap">',
+    '      <table>',
+    '        <thead><tr><th>#</th><th>Sản phẩm</th><th>Product ID</th><th>Số lượng bán</th><th>Doanh thu</th><th>Số đơn</th><th>Tiền tệ</th></tr></thead>',
+    `        <tbody>${reportProductRows || '<tr><td colspan="7">Không có dữ liệu.</td></tr>'}</tbody>`,
+    '      </table>',
+    '    </div>',
+    '  </section>',
+    '  <section class="report-section">',
+    '    <h3>Doanh thu theo ngày</h3>',
+    '    <div class="table-wrap">',
+    '      <table>',
+    '        <thead><tr><th>Ngày</th><th>Số đơn</th><th>Doanh thu</th><th>Tiền tệ</th></tr></thead>',
+    `        <tbody>${reportByDayRows || '<tr><td colspan="4">Không có dữ liệu.</td></tr>'}</tbody>`,
+    '      </table>',
+    '    </div>',
+    '  </section>',
+    '  <section class="report-section">',
+    '    <h3>Doanh thu theo tháng</h3>',
+    '    <div class="table-wrap">',
+    '      <table>',
+    '        <thead><tr><th>Tháng</th><th>Số đơn</th><th>Doanh thu</th><th>Tiền tệ</th></tr></thead>',
+    `        <tbody>${reportByMonthRows || '<tr><td colspan="4">Không có dữ liệu.</td></tr>'}</tbody>`,
+    '      </table>',
+    '    </div>',
+    '  </section>',
+    '  <section class="report-section">',
+    '    <h3>Doanh thu theo năm</h3>',
+    '    <div class="table-wrap">',
+    '      <table>',
+    '        <thead><tr><th>Năm</th><th>Số đơn</th><th>Doanh thu</th><th>Tiền tệ</th></tr></thead>',
+    `        <tbody>${reportByYearRows || '<tr><td colspan="4">Không có dữ liệu.</td></tr>'}</tbody>`,
+    '      </table>',
+    '    </div>',
+    '  </section>',
+    '</section>',
+  ].join('\n');
+
+  const mainStatGridHtml = safeTab === 'reports'
+    ? ''
+    : `<section class="stat-grid">${statCardsHtml}</section>`;
+
   const panelContent = safeTab === 'products'
     ? productPanel
     : safeTab === 'accounts'
       ? accountPanel
-      : orderPanel;
+      : safeTab === 'reports'
+        ? reportPanel
+        : orderPanel;
 
   return [
     '<!doctype html>',
@@ -2141,6 +2458,7 @@ function renderAdminDashboardPage({
     '    .stat-card { border: 1px solid var(--line); border-radius: 14px; padding: 10px 12px; background: #fff; min-height: 84px; display: grid; align-content: center; }',
     '    .stat-card h3 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; color: var(--muted); }',
     '    .stat-card p { margin: 4px 0 0; font-family: "Space Grotesk", sans-serif; font-size: 27px; line-height: 1; }',
+    '    .stat-card p.stat-multi { font-family: "IBM Plex Sans", sans-serif; font-size: 14px; line-height: 1.35; }',
     '    .tone-blue { background: linear-gradient(160deg, #ffffff, #edf6ff); }',
     '    .tone-amber { background: linear-gradient(160deg, #ffffff, #fff5e8); }',
     '    .tone-green { background: linear-gradient(160deg, #ffffff, #ebfff5); }',
@@ -2155,6 +2473,8 @@ function renderAdminDashboardPage({
     '    .panel-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }',
     '    .panel h2 { margin: 0; font-family: "Space Grotesk", sans-serif; font-size: 24px; }',
     '    .panel-subtitle { margin: 5px 0 0; color: var(--muted); font-size: 14px; }',
+    '    .report-section { display: grid; gap: 8px; margin-top: 12px; }',
+    '    .report-section h3 { margin: 0; font-family: "Space Grotesk", sans-serif; font-size: 18px; }',
     '    .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }',
     '    .chip { display: inline-flex; align-items: center; padding: 6px 11px; border-radius: 999px; border: 1px solid var(--line); color: #274765; text-decoration: none; font-size: 12px; font-weight: 600; background: #f9fcff; }',
     '    .chip.active { background: #e1fffa; border-color: #8cd5cb; color: #0a6159; }',
@@ -2215,7 +2535,7 @@ function renderAdminDashboardPage({
     '      </div>',
     `      <nav class="tabs">${nav}</nav>`,
     '    </section>',
-    `    <section class="stat-grid">${statCardsHtml}</section>`,
+    `    ${mainStatGridHtml}`,
     `    ${infoBlock}`,
     `    ${errorBlock}`,
     `    ${panelContent}`,
@@ -2751,6 +3071,9 @@ async function handleAdminDashboardRequest(req, res, requestUrl) {
     if (tab === 'orders') {
       orders = await loadDashboardOrders(statusFilter, 120);
     }
+    const reports = tab === 'reports'
+      ? await loadDashboardReports()
+      : createEmptyDashboardReports();
 
     let selectedProduct = null;
     let accountSummary = null;
@@ -2773,6 +3096,7 @@ async function handleAdminDashboardRequest(req, res, requestUrl) {
       selectedProductId,
       selectedProduct,
       accountSummary,
+      reports,
     });
     sendHtml(res, 200, html);
     return true;
@@ -2789,6 +3113,7 @@ async function handleAdminDashboardRequest(req, res, requestUrl) {
       selectedProductId: selectedProductIdRaw,
       selectedProduct: null,
       accountSummary: null,
+      reports: createEmptyDashboardReports(),
     }));
     return true;
   }
