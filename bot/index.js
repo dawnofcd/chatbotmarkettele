@@ -1631,6 +1631,39 @@ function normalizeDashboardAccountScope(rawScope) {
   return 'use';
 }
 
+function normalizeDashboardDateInput(rawDate) {
+  const value = String(rawDate || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return '';
+  }
+
+  const date = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+
+  return value;
+}
+
+function normalizeDashboardReportFilters(rawFilters = {}) {
+  const keywordRaw = String(rawFilters.productKeyword || '').trim();
+  const productKeyword = keywordRaw.slice(0, 120);
+  let dateFrom = normalizeDashboardDateInput(rawFilters.dateFrom);
+  let dateTo = normalizeDashboardDateInput(rawFilters.dateTo);
+
+  if (dateFrom && dateTo && dateFrom > dateTo) {
+    const tmp = dateFrom;
+    dateFrom = dateTo;
+    dateTo = tmp;
+  }
+
+  return {
+    productKeyword,
+    dateFrom,
+    dateTo,
+  };
+}
+
 function buildAdminDashboardUrl(params = {}) {
   const search = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
@@ -1715,9 +1748,9 @@ function createEmptyDashboardReports() {
       year: [],
     },
     byProduct: [],
-    byTypeDay: [],
-    byTypeMonth: [],
-    byTypeYear: [],
+    byProductDay: [],
+    byProductMonth: [],
+    byProductYear: [],
     byDay: [],
     byMonth: [],
     byYear: [],
@@ -1741,9 +1774,9 @@ function normalizeDashboardReports(reports) {
       year: Array.isArray(snapshot.year) ? snapshot.year : [],
     },
     byProduct: Array.isArray(reports.byProduct) ? reports.byProduct : [],
-    byTypeDay: Array.isArray(reports.byTypeDay) ? reports.byTypeDay : [],
-    byTypeMonth: Array.isArray(reports.byTypeMonth) ? reports.byTypeMonth : [],
-    byTypeYear: Array.isArray(reports.byTypeYear) ? reports.byTypeYear : [],
+    byProductDay: Array.isArray(reports.byProductDay) ? reports.byProductDay : [],
+    byProductMonth: Array.isArray(reports.byProductMonth) ? reports.byProductMonth : [],
+    byProductYear: Array.isArray(reports.byProductYear) ? reports.byProductYear : [],
     byDay: Array.isArray(reports.byDay) ? reports.byDay : [],
     byMonth: Array.isArray(reports.byMonth) ? reports.byMonth : [],
     byYear: Array.isArray(reports.byYear) ? reports.byYear : [],
@@ -1784,18 +1817,55 @@ function formatDashboardPeriodLabel(periodKey, periodType) {
   return raw;
 }
 
-function formatDashboardProductTypeLabel(productType) {
-  const normalized = String(productType || '').trim().toLowerCase();
-  if (normalized === 'code') {
-    return 'Code';
+function buildDashboardOrderDateFilter(filters, orderAlias = 'o') {
+  const clauses = [];
+  const params = [];
+  const safeFilters = normalizeDashboardReportFilters(filters);
+
+  if (safeFilters.dateFrom) {
+    params.push(safeFilters.dateFrom);
+    clauses.push(`timezone('Asia/Ho_Chi_Minh', ${orderAlias}.created_at)::date >= $${params.length}::date`);
   }
-  if (normalized === 'support') {
-    return 'Support';
+  if (safeFilters.dateTo) {
+    params.push(safeFilters.dateTo);
+    clauses.push(`timezone('Asia/Ho_Chi_Minh', ${orderAlias}.created_at)::date <= $${params.length}::date`);
   }
-  return 'Account';
+
+  return {
+    whereSql: clauses.length ? ` where ${clauses.join(' and ')}` : '',
+    params,
+  };
 }
 
-async function loadDashboardReports() {
+function buildDashboardSoldProductFilter(filters, orderAlias = 'o', productAlias = 'p') {
+  const clauses = [`${orderAlias}.status = 'paid'`];
+  const params = [];
+  const safeFilters = normalizeDashboardReportFilters(filters);
+
+  if (safeFilters.dateFrom) {
+    params.push(safeFilters.dateFrom);
+    clauses.push(`timezone('Asia/Ho_Chi_Minh', ${orderAlias}.created_at)::date >= $${params.length}::date`);
+  }
+  if (safeFilters.dateTo) {
+    params.push(safeFilters.dateTo);
+    clauses.push(`timezone('Asia/Ho_Chi_Minh', ${orderAlias}.created_at)::date <= $${params.length}::date`);
+  }
+  if (safeFilters.productKeyword) {
+    params.push(`%${safeFilters.productKeyword}%`);
+    clauses.push(`(${productAlias}.name ilike $${params.length} or coalesce(${productAlias}.description, '') ilike $${params.length})`);
+  }
+
+  return {
+    whereSql: clauses.length ? ` where ${clauses.join(' and ')}` : '',
+    params,
+  };
+}
+
+async function loadDashboardReports(filters = {}) {
+  const safeFilters = normalizeDashboardReportFilters(filters);
+  const orderDateFilter = buildDashboardOrderDateFilter(safeFilters, 'o');
+  const soldFilter = buildDashboardSoldProductFilter(safeFilters, 'o', 'p');
+
   const snapshotSql = `
     select
       coalesce(o.currency, 'VND') as currency,
@@ -1815,6 +1885,7 @@ async function loadDashboardReports() {
         else 0
       end), 0) as revenue_year
     from orders o
+    ${orderDateFilter.whereSql}
     group by coalesce(o.currency, 'VND')
     order by coalesce(o.currency, 'VND') asc
   `;
@@ -1829,6 +1900,7 @@ async function loadDashboardReports() {
     from order_items oi
     join orders o on o.id = oi.order_id
     left join products p on p.id = oi.product_id
+    ${soldFilter.whereSql}
     group by oi.product_id, p.name, coalesce(o.currency, 'VND')
     order by coalesce(sum(oi.total_price), 0) desc, coalesce(sum(oi.quantity), 0) desc, coalesce(p.name, oi.product_id::text) asc
   `;
@@ -1839,6 +1911,7 @@ async function loadDashboardReports() {
       count(*)::bigint as order_count,
       coalesce(sum(o.total_amount), 0) as total_revenue
     from orders o
+    ${orderDateFilter.whereSql}
     group by period_key, coalesce(o.currency, 'VND')
     order by period_key desc, coalesce(o.currency, 'VND') asc
   `;
@@ -1849,6 +1922,7 @@ async function loadDashboardReports() {
       count(*)::bigint as order_count,
       coalesce(sum(o.total_amount), 0) as total_revenue
     from orders o
+    ${orderDateFilter.whereSql}
     group by period_key, coalesce(o.currency, 'VND')
     order by period_key desc, coalesce(o.currency, 'VND') asc
   `;
@@ -1859,56 +1933,27 @@ async function loadDashboardReports() {
       count(*)::bigint as order_count,
       coalesce(sum(o.total_amount), 0) as total_revenue
     from orders o
+    ${orderDateFilter.whereSql}
     group by period_key, coalesce(o.currency, 'VND')
     order by period_key desc, coalesce(o.currency, 'VND') asc
   `;
-  const buildByTypeQuantitySql = (periodFormat) => `
-    with raw_items as (
-      select
-        to_char(timezone('Asia/Ho_Chi_Minh', o.created_at), '${periodFormat}') as period_key,
-        oi.order_id,
-        oi.quantity,
-        lower(coalesce(p.name, '') || ' ' || coalesce(p.description, '')) as merged_text,
-        lower(coalesce(p.delivery_type, '')) as delivery_type
-      from order_items oi
-      join orders o on o.id = oi.order_id
-      left join products p on p.id = oi.product_id
-    ),
-    typed_items as (
-      select
-        period_key,
-        order_id,
-        quantity,
-        case
-          when merged_text like '%[type:code]%' or merged_text like '%[type:key]%' then 'code'
-          when merged_text like '%[type:account]%' then 'account'
-          when merged_text like '%[type:support]%' then 'support'
-          when merged_text like '%code%'
-            or merged_text like '%key%'
-            or merged_text like '%kich hoat%'
-            or merged_text like '%license%'
-            or merged_text like '%credit%' then 'code'
-          when delivery_type = 'manual'
-            or merged_text like '%support%'
-            or merged_text like '%gia han%'
-            or merged_text like '%nang cap%'
-            or merged_text like '%lien he%' then 'support'
-          else 'account'
-        end as product_type
-      from raw_items
-    )
+  const buildByProductQuantitySql = (periodFormat) => `
     select
-      period_key,
-      product_type,
-      coalesce(sum(quantity), 0)::bigint as total_quantity,
-      count(distinct order_id)::bigint as total_orders
-    from typed_items
-    group by period_key, product_type
-    order by period_key desc, product_type asc
+      to_char(timezone('Asia/Ho_Chi_Minh', o.created_at), '${periodFormat}') as period_key,
+      oi.product_id,
+      coalesce(p.name, oi.product_id::text) as product_name,
+      coalesce(sum(oi.quantity), 0)::bigint as total_quantity,
+      count(distinct oi.order_id)::bigint as total_orders
+    from order_items oi
+    join orders o on o.id = oi.order_id
+    left join products p on p.id = oi.product_id
+    ${soldFilter.whereSql}
+    group by period_key, oi.product_id, p.name
+    order by period_key desc, coalesce(sum(oi.quantity), 0) desc, coalesce(p.name, oi.product_id::text) asc
   `;
-  const byTypeDaySql = buildByTypeQuantitySql('YYYY-MM-DD');
-  const byTypeMonthSql = buildByTypeQuantitySql('YYYY-MM');
-  const byTypeYearSql = buildByTypeQuantitySql('YYYY');
+  const byProductDaySql = buildByProductQuantitySql('YYYY-MM-DD');
+  const byProductMonthSql = buildByProductQuantitySql('YYYY-MM');
+  const byProductYearSql = buildByProductQuantitySql('YYYY');
 
   const [
     snapshotResp,
@@ -1916,18 +1961,18 @@ async function loadDashboardReports() {
     byDayResp,
     byMonthResp,
     byYearResp,
-    byTypeDayResp,
-    byTypeMonthResp,
-    byTypeYearResp,
+    byProductDayResp,
+    byProductMonthResp,
+    byProductYearResp,
   ] = await Promise.all([
-    db.query(snapshotSql),
-    db.query(byProductSql),
-    db.query(byDaySql),
-    db.query(byMonthSql),
-    db.query(byYearSql),
-    db.query(byTypeDaySql),
-    db.query(byTypeMonthSql),
-    db.query(byTypeYearSql),
+    db.query(snapshotSql, orderDateFilter.params),
+    db.query(byProductSql, soldFilter.params),
+    db.query(byDaySql, orderDateFilter.params),
+    db.query(byMonthSql, orderDateFilter.params),
+    db.query(byYearSql, orderDateFilter.params),
+    db.query(byProductDaySql, soldFilter.params),
+    db.query(byProductMonthSql, soldFilter.params),
+    db.query(byProductYearSql, soldFilter.params),
   ]);
 
   if (snapshotResp.error) throw snapshotResp.error;
@@ -1935,9 +1980,9 @@ async function loadDashboardReports() {
   if (byDayResp.error) throw byDayResp.error;
   if (byMonthResp.error) throw byMonthResp.error;
   if (byYearResp.error) throw byYearResp.error;
-  if (byTypeDayResp.error) throw byTypeDayResp.error;
-  if (byTypeMonthResp.error) throw byTypeMonthResp.error;
-  if (byTypeYearResp.error) throw byTypeYearResp.error;
+  if (byProductDayResp.error) throw byProductDayResp.error;
+  if (byProductMonthResp.error) throw byProductMonthResp.error;
+  if (byProductYearResp.error) throw byProductYearResp.error;
 
   const snapshot = {
     today: [],
@@ -1976,9 +2021,10 @@ async function loadDashboardReports() {
     orderCount: Math.max(0, Math.round(parseDashboardNumber(row.order_count))),
     totalRevenue: parseDashboardNumber(row.total_revenue),
   }));
-  const mapTypePeriodRows = (rows) => (rows || []).map((row) => ({
+  const mapProductPeriodRows = (rows) => (rows || []).map((row) => ({
     periodKey: String(row.period_key || '').trim(),
-    productType: String(row.product_type || 'account').trim().toLowerCase(),
+    productId: String(row.product_id || '').trim(),
+    productName: String(row.product_name || row.product_id || '').trim(),
     totalQuantity: Math.max(0, Math.round(parseDashboardNumber(row.total_quantity))),
     totalOrders: Math.max(0, Math.round(parseDashboardNumber(row.total_orders))),
   }));
@@ -1986,9 +2032,9 @@ async function loadDashboardReports() {
   return {
     snapshot,
     byProduct,
-    byTypeDay: mapTypePeriodRows(byTypeDayResp.data),
-    byTypeMonth: mapTypePeriodRows(byTypeMonthResp.data),
-    byTypeYear: mapTypePeriodRows(byTypeYearResp.data),
+    byProductDay: mapProductPeriodRows(byProductDayResp.data),
+    byProductMonth: mapProductPeriodRows(byProductMonthResp.data),
+    byProductYear: mapProductPeriodRows(byProductYearResp.data),
     byDay: mapPeriodRows(byDayResp.data),
     byMonth: mapPeriodRows(byMonthResp.data),
     byYear: mapPeriodRows(byYearResp.data),
@@ -2048,6 +2094,7 @@ function renderAdminDashboardPage({
   statusFilter = 'all',
   productScope = 'active',
   accountScope = 'use',
+  reportFilters = {},
   infoMessage = '',
   errorMessage = '',
   orders = [],
@@ -2061,6 +2108,7 @@ function renderAdminDashboardPage({
   const safeStatusFilter = normalizeDashboardOrderStatus(statusFilter);
   const safeProductScope = normalizeDashboardProductScope(productScope);
   const safeAccountScope = normalizeDashboardAccountScope(accountScope);
+  const safeReportFilters = normalizeDashboardReportFilters(reportFilters);
   const normalizedReports = normalizeDashboardReports(reports);
   const orderStatusOptions = ['all', 'draft', 'confirmed', 'paid', 'cancelled'];
   const statusMeta = {
@@ -2095,7 +2143,13 @@ function renderAdminDashboardPage({
     `<a class="${navOrdersClass}" href="${escapeHtml(buildAdminDashboardUrl({ tab: 'orders', status_filter: safeStatusFilter, products_scope: safeProductScope }))}">Đơn hàng</a>`,
     `<a class="${navProductsClass}" href="${escapeHtml(buildAdminDashboardUrl({ tab: 'products', products_scope: safeProductScope }))}">Sản phẩm</a>`,
     `<a class="${navAccountsClass}" href="${escapeHtml(buildAdminDashboardUrl({ tab: 'accounts', product_id: effectiveSelectedProductId, products_scope: safeProductScope, account_scope: safeAccountScope }))}">Kho account</a>`,
-    `<a class="${navReportsClass}" href="${escapeHtml(buildAdminDashboardUrl({ tab: 'reports', products_scope: safeProductScope }))}">Thống kê</a>`,
+    `<a class="${navReportsClass}" href="${escapeHtml(buildAdminDashboardUrl({
+      tab: 'reports',
+      products_scope: safeProductScope,
+      product_keyword: safeReportFilters.productKeyword,
+      date_from: safeReportFilters.dateFrom,
+      date_to: safeReportFilters.dateTo,
+    }))}">Thống kê</a>`,
   ].join('');
 
   const orderStats = {
@@ -2459,29 +2513,42 @@ function renderAdminDashboardPage({
   const reportByDayRows = buildReportPeriodRows(normalizedReports.byDay, 'day');
   const reportByMonthRows = buildReportPeriodRows(normalizedReports.byMonth, 'month');
   const reportByYearRows = buildReportPeriodRows(normalizedReports.byYear, 'year');
-  const buildReportTypeRows = (rows, periodType) => rows.map((row) => [
+  const buildReportProductPeriodRows = (rows, periodType) => rows.map((row) => [
     '<tr>',
     `  <td>${escapeHtml(formatDashboardPeriodLabel(row.periodKey, periodType))}</td>`,
-    `  <td>${escapeHtml(formatDashboardProductTypeLabel(row.productType))}</td>`,
+    `  <td>${escapeHtml(row.productName || '(không rõ)')}</td>`,
+    `  <td><code>${escapeHtml(row.productId || '-')}</code></td>`,
     `  <td>${escapeHtml(String(row.totalQuantity))}</td>`,
     `  <td>${escapeHtml(String(row.totalOrders))}</td>`,
     '</tr>',
   ].join('\n')).join('\n');
-  const reportTypeByDayRows = buildReportTypeRows(normalizedReports.byTypeDay, 'day');
-  const reportTypeByMonthRows = buildReportTypeRows(normalizedReports.byTypeMonth, 'month');
-  const reportTypeByYearRows = buildReportTypeRows(normalizedReports.byTypeYear, 'year');
+  const reportProductByDayRows = buildReportProductPeriodRows(normalizedReports.byProductDay, 'day');
+  const reportProductByMonthRows = buildReportProductPeriodRows(normalizedReports.byProductMonth, 'month');
+  const reportProductByYearRows = buildReportProductPeriodRows(normalizedReports.byProductYear, 'year');
+  const reportFilterForm = [
+    `<form class="inline-form" method="get" action="${escapeHtml(adminDashboardPath)}">`,
+    '  <input type="hidden" name="tab" value="reports" />',
+    `  <input type="hidden" name="products_scope" value="${escapeHtml(safeProductScope)}" />`,
+    `  <label>Tên sản phẩm <input type="text" name="product_keyword" value="${escapeHtml(safeReportFilters.productKeyword)}" placeholder="Ví dụ: Netflix" /></label>`,
+    `  <label>Từ ngày <input type="date" name="date_from" value="${escapeHtml(safeReportFilters.dateFrom)}" /></label>`,
+    `  <label>Đến ngày <input type="date" name="date_to" value="${escapeHtml(safeReportFilters.dateTo)}" /></label>`,
+    '  <button type="submit">Lọc</button>',
+    `  <a class="link-like" href="${escapeHtml(buildAdminDashboardUrl({ tab: 'reports', products_scope: safeProductScope }))}">Xóa lọc</a>`,
+    '</form>',
+  ].join('\n');
 
   const reportPanel = [
     '<section class="panel">',
     '  <div class="panel-head">',
     '    <div>',
     '      <h2>Thống kê</h2>',
-    '      <p class="panel-subtitle">Báo cáo theo sản phẩm, theo loại sản phẩm, và doanh thu theo ngày/tháng/năm (toàn bộ lịch sử).</p>',
+    '      <p class="panel-subtitle">Báo cáo theo sản phẩm đã bán (ngày/tháng/năm) và doanh thu theo kỳ. Có thể lọc theo tên sản phẩm và khoảng ngày.</p>',
     '    </div>',
-  '  </div>',
+    `    ${reportFilterForm}`,
+    '  </div>',
     `  <section class="stat-grid">${reportSnapshotCardsHtml}</section>`,
     '  <section class="report-section">',
-    '    <h3>Theo sản phẩm</h3>',
+    '    <h3>Tổng theo sản phẩm đã bán</h3>',
     '    <div class="table-wrap">',
     '      <table>',
     '        <thead><tr><th>#</th><th>Sản phẩm</th><th>Product ID</th><th>Số lượng bán</th><th>Doanh thu</th><th>Số đơn</th><th>Tiền tệ</th></tr></thead>',
@@ -2490,29 +2557,29 @@ function renderAdminDashboardPage({
     '    </div>',
   '  </section>',
     '  <section class="report-section">',
-    '    <h3>Số lượng theo loại sản phẩm (ngày)</h3>',
+    '    <h3>Số lượng theo sản phẩm đã bán (ngày)</h3>',
     '    <div class="table-wrap">',
     '      <table>',
-    '        <thead><tr><th>Ngày</th><th>Loại</th><th>Số lượng bán</th><th>Số đơn</th></tr></thead>',
-    `        <tbody>${reportTypeByDayRows || '<tr><td colspan="4">Không có dữ liệu.</td></tr>'}</tbody>`,
+    '        <thead><tr><th>Ngày</th><th>Sản phẩm</th><th>Product ID</th><th>Số lượng đã bán</th><th>Số đơn</th></tr></thead>',
+    `        <tbody>${reportProductByDayRows || '<tr><td colspan="5">Không có dữ liệu.</td></tr>'}</tbody>`,
     '      </table>',
     '    </div>',
     '  </section>',
     '  <section class="report-section">',
-    '    <h3>Số lượng theo loại sản phẩm (tháng)</h3>',
+    '    <h3>Số lượng theo sản phẩm đã bán (tháng)</h3>',
     '    <div class="table-wrap">',
     '      <table>',
-    '        <thead><tr><th>Tháng</th><th>Loại</th><th>Số lượng bán</th><th>Số đơn</th></tr></thead>',
-    `        <tbody>${reportTypeByMonthRows || '<tr><td colspan="4">Không có dữ liệu.</td></tr>'}</tbody>`,
+    '        <thead><tr><th>Tháng</th><th>Sản phẩm</th><th>Product ID</th><th>Số lượng đã bán</th><th>Số đơn</th></tr></thead>',
+    `        <tbody>${reportProductByMonthRows || '<tr><td colspan="5">Không có dữ liệu.</td></tr>'}</tbody>`,
     '      </table>',
     '    </div>',
     '  </section>',
     '  <section class="report-section">',
-    '    <h3>Số lượng theo loại sản phẩm (năm)</h3>',
+    '    <h3>Số lượng theo sản phẩm đã bán (năm)</h3>',
     '    <div class="table-wrap">',
     '      <table>',
-    '        <thead><tr><th>Năm</th><th>Loại</th><th>Số lượng bán</th><th>Số đơn</th></tr></thead>',
-    `        <tbody>${reportTypeByYearRows || '<tr><td colspan="4">Không có dữ liệu.</td></tr>'}</tbody>`,
+    '        <thead><tr><th>Năm</th><th>Sản phẩm</th><th>Product ID</th><th>Số lượng đã bán</th><th>Số đơn</th></tr></thead>',
+    `        <tbody>${reportProductByYearRows || '<tr><td colspan="5">Không có dữ liệu.</td></tr>'}</tbody>`,
     '      </table>',
     '    </div>',
     '  </section>',
@@ -2629,7 +2696,7 @@ function renderAdminDashboardPage({
     '    .create-form button { height: 38px; white-space: nowrap; }',
     '    .product-form label { display: inline-flex; align-items: center; gap: 6px; color: #475467; font-size: 12px; }',
     '    .edit-account-input { min-width: 260px; max-width: 420px; width: min(44vw, 420px); }',
-    '    input[type="number"], input[type="text"], select, textarea { border: 1px solid #cdd9e5; border-radius: 10px; padding: 7px 9px; font-size: 13px; color: var(--text); background: #fff; }',
+    '    input[type="number"], input[type="text"], input[type="date"], select, textarea { border: 1px solid #cdd9e5; border-radius: 10px; padding: 7px 9px; font-size: 13px; color: var(--text); background: #fff; }',
     '    textarea { width: 100%; min-height: 170px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }',
     '    input:focus, select:focus, textarea:focus { outline: 2px solid #b5ded8; outline-offset: 1px; border-color: #8bcfc6; }',
     '    button, .link-like { border: none; border-radius: 10px; background: var(--brand); color: #fff; padding: 8px 10px; font-weight: 600; font-size: 13px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; transition: transform .08s ease, filter .15s ease; }',
@@ -3182,6 +3249,11 @@ async function handleAdminDashboardRequest(req, res, requestUrl) {
   const statusFilter = normalizeDashboardOrderStatus(requestUrl.searchParams.get('status_filter'));
   const productScope = normalizeDashboardProductScope(requestUrl.searchParams.get('products_scope'));
   const accountScope = normalizeDashboardAccountScope(requestUrl.searchParams.get('account_scope'));
+  const reportFilters = normalizeDashboardReportFilters({
+    productKeyword: requestUrl.searchParams.get('product_keyword'),
+    dateFrom: requestUrl.searchParams.get('date_from'),
+    dateTo: requestUrl.searchParams.get('date_to'),
+  });
   const infoMessage = String(requestUrl.searchParams.get('msg') || '').trim();
   const errorMessage = String(requestUrl.searchParams.get('err') || '').trim();
   const selectedProductIdRaw = String(requestUrl.searchParams.get('product_id') || '').trim();
@@ -3198,7 +3270,7 @@ async function handleAdminDashboardRequest(req, res, requestUrl) {
       orders = await loadDashboardOrders(statusFilter, 120);
     }
     const reports = tab === 'reports'
-      ? await loadDashboardReports()
+      ? await loadDashboardReports(reportFilters)
       : createEmptyDashboardReports();
 
     let selectedProduct = null;
@@ -3215,6 +3287,7 @@ async function handleAdminDashboardRequest(req, res, requestUrl) {
       statusFilter,
       productScope,
       accountScope,
+      reportFilters,
       infoMessage,
       errorMessage,
       orders,
@@ -3232,6 +3305,7 @@ async function handleAdminDashboardRequest(req, res, requestUrl) {
       statusFilter,
       productScope,
       accountScope,
+      reportFilters,
       infoMessage: '',
       errorMessage: `Lỗi tải dashboard: ${String(error.message || 'unknown')}`,
       orders: [],
