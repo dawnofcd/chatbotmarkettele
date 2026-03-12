@@ -42,6 +42,14 @@ const orderExpirySweepIntervalMsRaw = Number(process.env.ORDER_EXPIRY_SWEEP_INTE
 const orderExpirySweepIntervalMs = Number.isFinite(orderExpirySweepIntervalMsRaw) && orderExpirySweepIntervalMsRaw >= 5000
   ? Math.round(orderExpirySweepIntervalMsRaw)
   : 15000;
+const orderExpiryOnUpdateMinGapMsRaw = Number(process.env.ORDER_EXPIRY_ON_UPDATE_MIN_GAP_MS || 10000);
+const orderExpiryOnUpdateMinGapMs = Number.isFinite(orderExpiryOnUpdateMinGapMsRaw) && orderExpiryOnUpdateMinGapMsRaw >= 1000
+  ? Math.round(orderExpiryOnUpdateMinGapMsRaw)
+  : 10000;
+const commandSyncTimeoutMsRaw = Number(process.env.COMMAND_SYNC_TIMEOUT_MS || 7000);
+const commandSyncTimeoutMs = Number.isFinite(commandSyncTimeoutMsRaw) && commandSyncTimeoutMsRaw >= 1000
+  ? Math.round(commandSyncTimeoutMsRaw)
+  : 7000;
 const notifyAllDelayMsRaw = Number(process.env.NOTIFY_ALL_DELAY_MS || 35);
 const notifyAllDelayMs = Number.isFinite(notifyAllDelayMsRaw) && notifyAllDelayMsRaw >= 0
   ? Math.round(notifyAllDelayMsRaw)
@@ -61,6 +69,10 @@ const bot = new Telegraf(botToken);
 const db = createClient({
   connectionString: databaseUrl,
   ssl: process.env.PGSSL === 'false' ? false : { rejectUnauthorized: false },
+});
+bot.use(async (ctx, next) => {
+  maybeRunOrderExpirySweepOnUpdate();
+  return next();
 });
 bot.use(async (ctx, next) => {
   const chatType = ctx.chat?.type;
@@ -91,6 +103,7 @@ const orderExpiryTimers = new Map();
 const adminDashboardSessions = new Map();
 let orderExpirySweepTimer = null;
 let orderExpirySweepInFlight = false;
+let orderExpirySweepLastTriggeredAt = 0;
 const inFlightCallbackUsers = new Set();
 const ORDER_MESSAGE_REF_PREFIX = '__MSGREF__';
 
@@ -567,6 +580,36 @@ function startOrderExpirySweeper() {
     orderExpirySweepTimer.unref();
   }
   runOrderExpirySweep();
+}
+
+function maybeRunOrderExpirySweepOnUpdate() {
+  const now = Date.now();
+  if ((now - orderExpirySweepLastTriggeredAt) < orderExpiryOnUpdateMinGapMs) {
+    return;
+  }
+
+  orderExpirySweepLastTriggeredAt = now;
+  runOrderExpirySweep();
+}
+
+async function runWithTimeout(taskFactory, timeoutMs, taskLabel) {
+  const label = String(taskLabel || 'task');
+  const timeout = Number.isFinite(Number(timeoutMs)) ? Math.max(1000, Math.round(Number(timeoutMs))) : 7000;
+  let timer = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeout}ms`)), timeout);
+  });
+
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => taskFactory()),
+      timeoutPromise,
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 function stopOrderExpirySweeper() {
@@ -7362,9 +7405,23 @@ bot.catch(async (err, ctx) => {
 const webhookServer = startMmobankWebhookServer();
 
 bot.launch().then(async () => {
-  await registerChatMenuCommands();
-  await restorePendingOrderExpirySchedules();
   startOrderExpirySweeper();
+  try {
+    await restorePendingOrderExpirySchedules();
+  } catch (error) {
+    console.error('restorePendingOrderExpirySchedules failed during startup:', error);
+  }
+
+  try {
+    await runWithTimeout(
+      () => registerChatMenuCommands(),
+      commandSyncTimeoutMs,
+      'registerChatMenuCommands',
+    );
+  } catch (error) {
+    console.error('registerChatMenuCommands skipped:', error);
+  }
+
   console.log('Bot launched.');
 }).catch((err) => {
   console.error('Failed to launch bot', err);
