@@ -35,10 +35,8 @@ const supportZaloNumber = process.env.SUPPORT_ZALO || '0563228054';
 const supportShopName = process.env.SUPPORT_SHOP_NAME || 'Tài Nguyên Hero';
 const supportZaloGroup = process.env.SUPPORT_ZALO_GROUP || '';
 const supportTelegramContact = process.env.SUPPORT_TELEGRAM || '';
-const paymentTimeoutSecondsRaw = Number(process.env.PAYMENT_TIMEOUT_SECONDS || 60);
-const paymentTimeoutSeconds = Number.isFinite(paymentTimeoutSecondsRaw) && paymentTimeoutSecondsRaw > 0
-  ? Math.round(paymentTimeoutSecondsRaw)
-  : 60;
+// Business rule: unpaid orders are auto-removed after exactly 60 seconds.
+const paymentTimeoutSeconds = 60;
 const paymentTimeoutMs = paymentTimeoutSeconds * 1000;
 const orderExpirySweepIntervalMsRaw = Number(process.env.ORDER_EXPIRY_SWEEP_INTERVAL_MS || 15000);
 const orderExpirySweepIntervalMs = Number.isFinite(orderExpirySweepIntervalMsRaw) && orderExpirySweepIntervalMsRaw >= 5000
@@ -314,6 +312,104 @@ async function expireUnpaidOrder(orderId) {
   }
 }
 
+async function recoverOverdueOrderStockAndDelete(orderId) {
+  const oid = String(orderId || '').trim();
+  if (!oid) {
+    return { ok: false, reason: 'order_id_missing' };
+  }
+
+  const { data: order, error: orderError } = await db
+    .from('orders')
+    .select('id,user_id,status')
+    .eq('id', oid)
+    .maybeSingle();
+  if (orderError) {
+    throw orderError;
+  }
+  if (!order) {
+    return { ok: false, reason: 'not_found' };
+  }
+
+  const currentStatus = String(order.status || '').toLowerCase();
+  if (currentStatus === 'paid') {
+    return { ok: false, reason: 'already_paid' };
+  }
+
+  let accountProductIds = [];
+  try {
+    const { data: accountRows, error: accountRowsError } = await db
+      .from('product_accounts')
+      .select('product_id')
+      .eq('used_order_id', oid)
+      .limit(5000);
+    if (accountRowsError) {
+      throw accountRowsError;
+    }
+    accountProductIds = [...new Set((accountRows || []).map((row) => String(row.product_id || '').trim()).filter(Boolean))];
+  } catch (error) {
+    console.error('recoverOverdueOrderStockAndDelete load account rows failed:', error);
+  }
+
+  try {
+    await db
+      .from('product_accounts')
+      .update({ is_used: false, used_order_id: null, used_at: null })
+      .eq('used_order_id', oid);
+  } catch (error) {
+    console.error('recoverOverdueOrderStockAndDelete release account locks failed:', error);
+  }
+
+  if (currentStatus === 'draft' || currentStatus === 'confirmed') {
+    try {
+      await restoreStockFromOrderItems(oid, { skipProductIds: accountProductIds });
+    } catch (error) {
+      console.error('recoverOverdueOrderStockAndDelete restoreStockFromOrderItems failed:', error);
+    }
+  }
+
+  await clearOrderPaymentMessages(oid);
+
+  const { data: deletedOrder, error: deleteError } = await db
+    .from('orders')
+    .delete()
+    .eq('id', oid)
+    .in('status', ['draft', 'confirmed', 'cancelled'])
+    .select('id,user_id')
+    .maybeSingle();
+  if (deleteError) {
+    throw deleteError;
+  }
+  if (!deletedOrder) {
+    return { ok: false, reason: 'delete_failed_or_status_changed' };
+  }
+
+  for (const productId of accountProductIds) {
+    try {
+      await syncProductStockFromAutoAccounts(productId);
+    } catch (error) {
+      console.error('recoverOverdueOrderStockAndDelete syncProductStockFromAutoAccounts failed:', error);
+    }
+  }
+
+  try {
+    const { data: owner } = await db
+      .from('users')
+      .select('telegram_id')
+      .eq('id', deletedOrder.user_id)
+      .maybeSingle();
+    if (owner?.telegram_id) {
+      await bot.telegram.sendMessage(
+        Number(owner.telegram_id),
+        `Đơn #${deletedOrder.id} đã tự xóa do quá ${paymentTimeoutSeconds} giây chưa thanh toán.`,
+      );
+    }
+  } catch (error) {
+    // no-op
+  }
+
+  return { ok: true, deletedOrderId: deletedOrder.id };
+}
+
 function scheduleOrderExpiry(orderId, delayMs = paymentTimeoutMs) {
   const oid = String(orderId || '').trim();
   if (!oid) {
@@ -364,8 +460,20 @@ async function restorePendingOrderExpirySchedules() {
     const elapsedMs = now - createdAtMs;
     const remainingMs = paymentTimeoutMs - elapsedMs;
     if (remainingMs <= 0) {
-      await expireUnpaidOrder(order.id);
-      expiredNowCount += 1;
+      try {
+        await expireUnpaidOrder(order.id);
+        expiredNowCount += 1;
+      } catch (error) {
+        console.error(`restorePendingOrderExpirySchedules expire failed for ${order.id}:`, error);
+        try {
+          const recovered = await recoverOverdueOrderStockAndDelete(order.id);
+          if (recovered.ok) {
+            expiredNowCount += 1;
+          }
+        } catch (recoverError) {
+          console.error(`restorePendingOrderExpirySchedules recover failed for ${order.id}:`, recoverError);
+        }
+      }
       continue;
     }
 
@@ -380,8 +488,8 @@ async function expireOverdueUnpaidOrders(limit = 5000) {
   const maxRows = Number.isFinite(Number(limit)) ? Math.max(1, Math.round(Number(limit))) : 5000;
   const { data: pendingOrders, error } = await db
     .from('orders')
-    .select('id,created_at')
-    .in('status', ['draft', 'confirmed'])
+    .select('id,status,created_at')
+    .in('status', ['draft', 'confirmed', 'cancelled'])
     .order('created_at', { ascending: true })
     .limit(maxRows);
   if (error) {
@@ -398,9 +506,33 @@ async function expireOverdueUnpaidOrders(limit = 5000) {
     if ((now - createdAtMs) < paymentTimeoutMs) {
       break;
     }
+    const currentStatus = String(order.status || '').toLowerCase();
+    if (currentStatus === 'cancelled') {
+      try {
+        const recovered = await recoverOverdueOrderStockAndDelete(order.id);
+        if (recovered.ok) {
+          expiredCount += 1;
+        }
+      } catch (error) {
+        console.error(`recoverOverdueOrderStockAndDelete failed for cancelled order ${order.id}:`, error);
+      }
+      continue;
+    }
 
-    await expireUnpaidOrder(order.id);
-    expiredCount += 1;
+    try {
+      await expireUnpaidOrder(order.id);
+      expiredCount += 1;
+    } catch (error) {
+      console.error(`expireUnpaidOrder failed for ${order.id}:`, error);
+      try {
+        const recovered = await recoverOverdueOrderStockAndDelete(order.id);
+        if (recovered.ok) {
+          expiredCount += 1;
+        }
+      } catch (recoverError) {
+        console.error(`recoverOverdueOrderStockAndDelete failed for ${order.id}:`, recoverError);
+      }
+    }
   }
   return expiredCount;
 }
