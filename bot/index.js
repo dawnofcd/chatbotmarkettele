@@ -635,21 +635,64 @@ function parseAccountData(rawAccountData) {
   };
 }
 
-function buildPaidDeliveryMessage(order, sections, shortageCount) {
+function formatBuyerDisplayName(userRecord) {
+  const displayName = String(userRecord?.display_name || '').trim();
+  if (displayName) {
+    return displayName;
+  }
+
+  const username = String(userRecord?.username || '').trim();
+  if (username) {
+    return `@${username}`;
+  }
+
+  const telegramId = userRecord?.telegram_id == null ? '' : String(userRecord.telegram_id).trim();
+  if (telegramId) {
+    return `tele:${telegramId}`;
+  }
+
+  return '(khong ro)';
+}
+
+function buildPaidInvoiceMessage(orderId, amount, currency, paidAt, buyerName) {
+  const supportCode = buildSupportOrderCode(orderId);
+  const orderCode = String(orderId || '').toUpperCase();
+  const paidAtText = formatDateTimeVietnam(paidAt || new Date());
+  const buyerText = String(buyerName || '').trim() || '(khong ro)';
+
+  return [
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '🧾 HÓA ĐƠN THANH TOÁN',
+    '━━━━━━━━━━━━━━━━━━━━━━',
+    '',
+    `🔖 Mã đơn (định dạng DHxxxxxx): ${supportCode || '(N/A)'}`,
+    `🔐 Mã đơn hệ thống: #${orderCode}`,
+    `👤 Người mua: ${buyerText}`,
+    `🕒 Thời gian trả: ${paidAtText}`,
+    `💰 Tổng tiền: ${formatPriceVnd(amount)} ${currency || 'VND'}`,
+    '',
+    'Cảm ơn bạn đã mua hàng ✅',
+    '━━━━━━━━━━━━━━━━━━━━━━',
+  ].join('\n');
+}
+
+function buildPaidDeliveryMessage(order, sections, shortageCount, options = {}) {
   const orderCode = String(order?.id || '').toUpperCase();
   const supportCode = buildSupportOrderCode(order?.id);
   const productName = sections[0]?.productName || '(khong ro)';
-  const deliveredAt = formatDateTimeVietnam(new Date());
+  const deliveredAt = formatDateTimeVietnam(options.deliveredAt || new Date());
+  const buyerName = String(options.buyerName || '').trim() || '(khong ro)';
 
   const lines = [
     '━━━━━━━━━━━━━━━━━━━━━━',
     '🧾 THÔNG TIN ĐƠN HÀNG',
     '━━━━━━━━━━━━━━━━━━━━━━',
     '',
+    `🔖 Mã đơn (định dạng DHxxxxxx): ${supportCode || '(N/A)'}`,
     `🔐 Mã đơn: #${orderCode}`,
-    `🧷 Mã hỗ trợ: ${supportCode || '(N/A)'}`,
+    `👤 Người mua: ${buyerName}`,
     `📦 Sản phẩm: ${productName}`,
-    `🗓 Ngày trả đơn: ${deliveredAt}`,
+    `🕒 Thời gian trả: ${deliveredAt}`,
     '',
     '━━━━━━━━━━━━━━━━━━━━━━',
     '📌 TÀI KHOẢN (định dạng: TK | MK | 2FA)',
@@ -1592,6 +1635,7 @@ async function updateOrderStatusFromAdmin(orderId, status, changedByUserId = nul
 
   if (targetStatus === 'paid') {
     clearOrderExpiryTimer(updated.id);
+    await notifyOrderPaid(updated.id, updated.user_id, updated.total_amount, updated.currency || 'VND');
     await deliverAutoAccountsAfterPaid(updated);
     await clearOrderPaymentMessages(updated.id);
   } else if (targetStatus === 'cancelled') {
@@ -1621,6 +1665,9 @@ async function updateOrderStatusFromAdmin(orderId, status, changedByUserId = nul
 
 async function notifyOrderOwnerStatusChanged(order) {
   if (!order?.id || !order?.user_id) {
+    return;
+  }
+  if (String(order.status || '').toLowerCase() === 'paid') {
     return;
   }
 
@@ -3546,10 +3593,11 @@ async function findOrderByTransferCode(transferCode) {
 }
 
 async function notifyOrderPaid(orderId, userId, amount, currency) {
-  const deliveredAt = formatDateTimeVietnam(new Date());
+  const paidAt = new Date();
+  const deliveredAt = formatDateTimeVietnam(paidAt);
   const { data: owner, error: ownerError } = await db
     .from('users')
-    .select('telegram_id')
+    .select('telegram_id,username,display_name')
     .eq('id', userId)
     .maybeSingle();
 
@@ -3557,11 +3605,14 @@ async function notifyOrderPaid(orderId, userId, amount, currency) {
     throw ownerError;
   }
 
+  const buyerName = formatBuyerDisplayName(owner);
+  const invoiceText = buildPaidInvoiceMessage(orderId, amount, currency, paidAt, buyerName);
+
   if (owner?.telegram_id) {
     try {
       await bot.telegram.sendMessage(
         Number(owner.telegram_id),
-        `Don #${orderId} da duoc xac nhan thanh toan.\nSo tien: ${amount} ${currency || 'VND'}\nNgay tra don: ${deliveredAt}`,
+        invoiceText,
       );
     } catch (error) {
       // no-op
@@ -3573,7 +3624,7 @@ async function notifyOrderPaid(orderId, userId, amount, currency) {
     try {
       await bot.telegram.sendMessage(
         telegramId,
-        `MMOBank webhook: don #${orderId} da thanh toan.\nSo tien: ${amount} ${currency || 'VND'}\nNgay tra don: ${deliveredAt}`,
+        `MMOBank webhook: don #${orderId} da thanh toan.\nMa DH: ${buildSupportOrderCode(orderId) || '(N/A)'}\nNguoi mua: ${buyerName}\nSo tien: ${formatPriceVnd(amount)} ${currency || 'VND'}\nThoi gian tra: ${deliveredAt}`,
       );
     } catch (error) {
       // no-op
@@ -3672,7 +3723,7 @@ async function deliverAutoAccountsAfterPaid(order) {
 
   const { data: owner, error: ownerError } = await db
     .from('users')
-    .select('telegram_id')
+    .select('telegram_id,username,display_name')
     .eq('id', order.user_id)
     .maybeSingle();
   if (ownerError) {
@@ -3680,7 +3731,10 @@ async function deliverAutoAccountsAfterPaid(order) {
   }
 
   if (owner?.telegram_id) {
-    const text = buildPaidDeliveryMessage(order, sections, shortageCount);
+    const text = buildPaidDeliveryMessage(order, sections, shortageCount, {
+      buyerName: formatBuyerDisplayName(owner),
+      deliveredAt: new Date(),
+    });
     try {
       await bot.telegram.sendMessage(
         Number(owner.telegram_id),
@@ -5698,7 +5752,6 @@ async function processPurchase(ctx, user, locale, product, quantity = 1) {
         caption: mmobank.text,
         ...Markup.inlineKeyboard([
           [Markup.button.callback('Tôi đã chuyển khoản', `paydone:${order.id}`)],
-          [Markup.button.callback('Hủy đơn', `paycancel:${order.id}`)],
         ]),
       });
     } catch (error) {
@@ -5706,7 +5759,6 @@ async function processPurchase(ctx, user, locale, product, quantity = 1) {
         mmobank.text,
         Markup.inlineKeyboard([
           [Markup.button.callback('Tôi đã chuyển khoản', `paydone:${order.id}`)],
-          [Markup.button.callback('Hủy đơn', `paycancel:${order.id}`)],
         ]),
       );
     }
@@ -5715,7 +5767,6 @@ async function processPurchase(ctx, user, locale, product, quantity = 1) {
       mmobank.text,
       Markup.inlineKeyboard([
         [Markup.button.callback('Tôi đã chuyển khoản', `paydone:${order.id}`)],
-        [Markup.button.callback('Hủy đơn', `paycancel:${order.id}`)],
       ]),
     );
   }
@@ -6651,35 +6702,11 @@ bot.action(/^paydone:(.+)$/, async (ctx) => {
 });
 
 bot.action(/^paycancel:(.+)$/, async (ctx) => {
-  try {
-    const user = await ensureUser(ctx);
-    const locale = getLocale(user);
-    const orderId = ctx.match[1];
-
-    const result = await cancelOrderByUser(orderId, user.id);
-    if (!result.ok) {
-      if (result.reason === 'not_found') {
-        await safeAnswerCbQuery(ctx, locale === 'en' ? 'Order not found' : 'Không tìm thấy đơn', { show_alert: true });
-        return;
-      }
-      if (result.reason === 'paid') {
-        await safeAnswerCbQuery(ctx, locale === 'en' ? 'Order already paid' : 'Đơn đã thanh toán', { show_alert: true });
-        return;
-      }
-      await safeAnswerCbQuery(ctx, locale === 'en' ? 'Unable to cancel now' : 'Không thể hủy lúc này', { show_alert: true });
-      return;
-    }
-
-    await safeAnswerCbQuery(ctx, result.alreadyCancelled ? 'Đã hủy trước đó' : 'Đã hủy đơn');
-    try {
-      await ctx.deleteMessage();
-    } catch (deleteError) {
-      // no-op: can already be deleted by clearOrderPaymentMessages
-    }
-  } catch (error) {
-    console.error('paycancel handler failed:', error);
-    await safeAnswerCbQuery(ctx, 'Đơn có thể đã hết hạn hoặc đã xử lý.', { show_alert: true });
-  }
+  await safeAnswerCbQuery(
+    ctx,
+    'Nút hủy đơn đã bị tắt. Đơn sẽ tự hủy sau 60 giây nếu chưa thanh toán.',
+    { show_alert: true },
+  );
 });
 
 bot.action(/^lang:(vi|en)$/, async (ctx) => {

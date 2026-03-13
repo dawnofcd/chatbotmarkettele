@@ -290,7 +290,9 @@ class QueryBuilder {
         const finalValues = [...setValues, ...whereValues];
 
         let shiftedWhere = where;
-        for (let i = 1; i <= whereValues.length; i += 1) {
+        // Shift placeholders from right to left to avoid cascading replacements:
+        // "$1,$2,$3" + offset 1 -> "$2,$3,$4" (not "$4,$4,$4").
+        for (let i = whereValues.length; i >= 1; i -= 1) {
           const from = new RegExp(`\\$${i}\\b`, 'g');
           shiftedWhere = shiftedWhere.replace(from, `$${i + setValues.length}`);
         }
